@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src/_backup/
+Claude outputs/
+.claude/
+*.log
+.DS_Store
+Thumbs.db

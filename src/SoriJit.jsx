@@ -5,7 +5,26 @@ import './sorijit.css';
 // ws://localhost:8765 로 프레임 판정 {vowel, vowel_raw, margin, f0, rms} 수신.
 // 신선한 WS 프레임이 있으면 모음/피치를 Python 모델 값으로 덮어쓰고,
 // 끊기거나 오래되면(STALE) 브라우저 포먼트 분석으로 자동 복귀한다.
-const RECOG_WS_URL = 'ws://localhost:8765';
+
+// WebSocket 주소 결정. 우선순위: ?ws 쿼리 > 환경변수 > 자동(https→wss, http→ws://localhost:8765)
+// https 페이지는 ws:// 차단(혼합 콘텐츠), wss:// 필수. 같은 호스트 리버스프록시 배포는 별도 설정 불필요.
+function resolveRecogWsUrl() {
+  const params = new URLSearchParams(location.search);
+  let url = params.get('ws') || import.meta.env.VITE_RECOG_WS_URL;
+
+  if (!url) {
+    url = location.protocol === 'https:' ? `wss://${location.host}` : 'ws://localhost:8765';
+  }
+
+  const key = params.get('key');
+  if (key && !url.includes('key=')) {
+    url += (url.includes('?') ? '&' : '?') + `key=${encodeURIComponent(key)}`;
+  }
+
+  return url;
+}
+
+const RECOG_WS_URL = resolveRecogWsUrl();
 const RECOG_STALE_MS = 300;
 
 // 원본 x-dc 컴포넌트의 props 기본값
@@ -28,7 +47,8 @@ export default class SoriJit extends React.Component {
   state = { running:false, err:'', level:0, pitch:0, dur:0, trem:0, vowel:'', voiced:false,
     menuOpen:false, sens:1.2, thresh:0.05, basePitch:190, calibrating:false,
     endHold:320, sizeMul:1, vowelTol:0.6, meters:true, graph:true, useRecogWS:true, recogStatus:'off', freeze:false,
-    bgMode:'off', bgDepth:0, bgShift:0.45, render3d:true, gl3dStatus:'loading' };   // bgShift: 배경과 발화색의 파장 간격   // bgDepth: 배경 진하기 (0 아주 연하게 … 1 원색)
+    bgMode:'off', bgDepth:0, bgShift:0.45, render3d:true, gl3dStatus:'loading',   // bgShift: 배경과 발화색의 파장 간격   // bgDepth: 배경 진하기 (0 아주 연하게 … 1 원색)
+    srWarn:'', recogRefF0:null };   // srWarn: AudioContext 샘플레이트가 48000 이 아닐 때의 경고 / recogRefF0: 서버 캘리브레이션이 돌려준 기준 피치
   canvasRef = React.createRef();
   graphRef = React.createRef();
   pitchGraphRef = React.createRef();
@@ -36,6 +56,7 @@ export default class SoriJit extends React.Component {
   cur = null; pitchHist = []; wave = [];
   lastVoiceT = 0; lastMeterT = 0; smoothLvl = 0;
   smoothSize = 0; rawRms = 0; vpMin = 800;   // 크기 전용 세기(0~2, dB) / 화면 짧은 변(px)
+  _pcmRms = null;   // 워크릿이 서버의 10ms 홉 그리드로 로컬 계산해 보내는 rms(가장 최근 값, 평균 아님). null 이면 워크릿 미가동 → analyser 로 대체
   smoothTrem = 0; lastGoodPitch = 0;
   tremF = 0; tremFHz = 6; tremS = 0; tremSHz = 1;   // 잔떨림/억양 흔들림 세기(0~1)와 빠르기(Hz), 부드럽게 따라간 값   // 움직임용 실시간 떨림 / f0 옥타브 방어용 직전 유효 피치
   DEBUG_TREM = false;   // 임시 진단 오버레이 (확인 후 제거)
@@ -279,9 +300,20 @@ export default class SoriJit extends React.Component {
     ws.onopen = ()=>{ if(this.ws === ws) this.setState({recogStatus:'live'}); };
     ws.onmessage = (ev)=>{
       let d; try{ d = JSON.parse(ev.data); }catch(_){ return; }
+      // 'hop' 이 아닌 제어 응답(calibrated/error/reset_ok)은 모음 판정 프레임이 아니므로 wsFrame 을
+      // 건드리지 않고 여기서 처리만 한다 — 안 그러면 calibrated 응답이 vowel:null 로 잡혀 버블이 한 프레임 사라진다.
+      if(d.type && d.type !== 'hop'){
+        if(d.type === 'calibrated') this.setState({recogRefF0:(d.ref_f0 == null ? null : +d.ref_f0)});
+        else if(d.type === 'error') console.error('[recogWS] 서버 오류:', d.message);
+        // reset_ok 는 별도 처리 없음
+        return;
+      }
       const vw = (d.vowel === '?' || d.vowel == null) ? null : d.vowel;
       this.wsFrame = { vowel:vw,
         f0:(d.f0 == null ? null : +d.f0),
+        // rms 는 저장만 해두고 세기(this.rawRms)에는 쓰지 않는다 — rms 는 의도적으로 로컬에서
+        // (pcm-worklet.js, 서버와 같은 10ms 홉 그리드로) 계산한다. 지연 0 을 지키기 위함이니,
+        // 이 필드를 "안 쓰고 있네" 하고 되살려 다시 연결하지 말 것.
         rms:(d.rms == null ? null : +d.rms),
         margin:(d.margin == null ? 0 : +d.margin),
         t:performance.now() };
@@ -308,13 +340,48 @@ export default class SoriJit extends React.Component {
 
   start = async ()=>{
     try{
-      this.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
-      this.ac = new AudioContext();
+      this.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:1}});
+      // RE:MARK 수집기(recorder.ts)와 동일한 검증 — 요청만으로는 부족하고 실제로 꺼졌는지 getSettings() 로 확인한다.
+      const track = this.stream.getAudioTracks()[0];
+      const ts = track ? track.getSettings() : {};
+      if(ts.echoCancellation !== false || ts.noiseSuppression !== false || ts.autoGainControl !== false){
+        console.warn('[mic] echoCancellation/noiseSuppression/autoGainControl 이 꺼진 것으로 확인되지 않음 (포먼트 훼손 위험):', ts);
+      }
+      this.ac = new AudioContext({sampleRate:48000});
+      // 샘플레이트는 요청만 가능하고 브라우저가 무시할 수 있다. 서버는 48kHz 를 가정하므로
+      // 실제 값이 다르면 리샘플링 없이 조용히 보내지 않고(이 범위 밖) 경고로 드러낸다 —
+      // 이 프로젝트에 "정규화 불일치로 인식률이 95%→30%로 붕괴"한 전례가 있어 조용한 성능 저하를 남기지 않는다.
+      if(this.ac.sampleRate !== 48000){
+        console.warn('[mic] AudioContext sampleRate가 48000Hz 가 아님:', this.ac.sampleRate);
+        this.setState({srWarn:`⚠ 마이크 실제 샘플레이트 ${this.ac.sampleRate}Hz (서버는 48000Hz 가정 — 인식 품질 저하 가능)`});
+      } else this.setState({srWarn:''});
       const src = this.ac.createMediaStreamSource(this.stream);
       this.an = this.ac.createAnalyser(); this.an.fftSize = 4096; this.an.smoothingTimeConstant = .5;
       src.connect(this.an);
       this.tbuf = new Float32Array(this.an.fftSize);
       this.fbuf = new Float32Array(this.an.frequencyBinCount);
+      // ── 서버로 원본 PCM 업스트림 (AudioWorklet) ── 서버가 원격 호스팅되어 더 이상 로컬 마이크를
+      // 직접 읽지 못하므로, 브라우저가 떠 온 샘플을 WS 바이너리 프레임으로 그대로 올려 보낸다.
+      // MediaRecorder 는 손실 압축으로 포먼트를 훼손하므로 쓰지 않는다(recorder.ts 와 동일 원칙).
+      try{
+        await this.ac.audioWorklet.addModule('/pcm-worklet.js');
+        this.pcmNode = new AudioWorkletNode(this.ac, 'pcm-sender', {numberOfInputs:1, numberOfOutputs:1, channelCount:1, channelCountMode:'explicit'});
+        this.pcmNode.port.onmessage = (ev)=>{
+          const d = ev.data;
+          if(d instanceof Float32Array){
+            if(this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(d.buffer);
+          } else if(d && typeof d.rms === 'number'){
+            // 서버와 같은 10ms 홉 그리드의 로컬 rms. 애니메이션 프레임(~16.7ms)보다 자주 오므로
+            // 가장 최근 값으로 덮어쓴다 — 평균하면 DIP_MS(48ms) 재타격 판정이 보는 골이 다시 뭉개진다.
+            this._pcmRms = d.rms;
+          }
+        };
+        src.connect(this.pcmNode);
+        // Chrome 은 destination 까지 연결돼야 그래프를 구동한다. 게인 0 으로 물려 소리는 내지 않는다(하울링 방지).
+        const sink = this.ac.createGain(); sink.gain.value = 0;
+        this.pcmNode.connect(sink); sink.connect(this.ac.destination);
+        this.pcmSink = sink;
+      }catch(e){ console.error('[mic] PCM 업스트림 워크릿 로드 실패 — 인식 서버로 오디오가 전송되지 않습니다:', e); }
       this.setState({running:true, err:''});
     }catch(e){ this.setState({err:'마이크 권한이 필요합니다. 브라우저 설정에서 허용해 주세요.'}); }
   };
@@ -552,7 +619,15 @@ export default class SoriJit extends React.Component {
       this.an.getFloatTimeDomainData(this.tbuf);
       this.an.getFloatFrequencyData(this.fbuf);
       const r = this.autoCorrelate(this.tbuf, this.ac.sampleRate);
-      level = Math.min(1, r.rms*9*this.state.sens); pitch = r.pitch; this.rawRms = r.rms;
+      pitch = r.pitch;
+      // 세기(rms)는 로컬에서, 서버와 같은 10ms 홉 그리드로 계산한다(pcm-worklet.js, this._pcmRms).
+      // 지연·분해도는 별개 문제였다: 지연은 로컬이라 왕복 0 으로 이미 최선이고, 분해도는
+      // AnalyserNode(fftSize 4096 ≈ 85ms@48kHz)가 문제였다 — RELEASE_RATIO/DIP_MS(48ms) 재타격
+      // 판정이 봐야 할 골을 85ms 창 평균이 묻어버려, 분절이 그 임계값엔 너무 거친 신호로 구동됐다.
+      // 워크릿이 10ms 블록 rms 를 로컬로 주므로 분해도도 고쳐지고 왕복은 여전히 없다.
+      // 워크릿 로드 실패 시(this._pcmRms 가 한 번도 안 옴)에만 analyser 값으로 대체한다.
+      this.rawRms = (this._pcmRms != null) ? this._pcmRms : r.rms;
+      level = Math.min(1, this.rawRms*9*this.state.sens);
       // Python 인식 WS 가 신선하면 피치는 YIN(Python) 값 우선 (없으면 브라우저 autoCorrelate 유지)
       if(this.state.useRecogWS && this.recogFresh(now) && this.wsFrame.f0 != null) pitch = this.wsFrame.f0;
       }
@@ -561,6 +636,9 @@ export default class SoriJit extends React.Component {
         if(now > this.calibEnd){
           const t = Math.min(.2, Math.max(.03, this.calibMax*1.8+.02));
           this.calibEnd = 0; this.setState({thresh:+t.toFixed(3), calibrating:false});
+          // UI 캘리브레이션이 끝나는 순간 서버 캘리브레이션도 같이 끝낸다 — ref_rms/ref_f0 가
+          // UI가 측정한 것과 같은 발화 구간에서 나오도록(calibrate_start 는 calibrateNoise() 에서 보냄).
+          if(this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({type:'calibrate_end'}));
         }
       }
       // 타자·박수 등 피치 없는 잡음 차단 — f0 가 있어야 발성으로 인정(250ms 여유)
@@ -2470,7 +2548,9 @@ bgRGB(t, P){
   calibrateNoise = ()=>{
     if(!this.state.running || this.state.calibrating) return;
     this.calibMax = 0; this.calibEnd = performance.now()+1600;
-    this.setState({calibrating:true});
+    this.setState({calibrating:true, recogRefF0:null});
+    // 서버 캘리브레이션도 같은 발화 구간에서 시작 — 끝은 위 loop() 의 calibEnd 분기에서 보낸다.
+    if(this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({type:'calibrate_start'}));
   };
 
   renderVals(){
@@ -2528,6 +2608,8 @@ bgRGB(t, P){
       setBgVivid: ()=>this.setState({bgMode:'vivid'}),
       setBgOff: ()=>this.setState({bgMode:'off'}),
       calBtnLabel: s.calibrating ? '주변 소음 측정 중…' : '주변 소음 자동 측정',
+      recogRefF0Label: s.recogRefF0 ? `서버 기준 피치 ${Math.round(s.recogRefF0)} Hz` : '',
+      srWarnMsg: s.srWarn,
       r3dOn: s.render3d && s.gl3dStatus==='ready', r3dOff: !(s.render3d && s.gl3dStatus==='ready'),
       setR3d: ()=>{ if(this.gl3d) this.setState({render3d:true}); },
       setR2d: ()=>this.setState({render3d:false}),
@@ -2598,6 +2680,11 @@ bgRGB(t, P){
                     <button className="btn btn-secondary" onClick={v.calibrateNoise} style={{width:"100%"}}>
                       {v.calBtnLabel}
                     </button>
+                    {v.recogRefF0Label ? (
+                      <span style={{fontSize:"11.5px",color:"var(--color-neutral-500)"}}>
+                        {v.recogRefF0Label}
+                      </span>
+                    ) : null}
                     <div style={{fontFamily:"var(--font-heading)",fontSize:"13.5px",fontWeight:"700",letterSpacing:".01em",color:"var(--color-text)",margin:"8px 0 2px",borderTop:"1px solid var(--color-divider)",paddingTop:"14px"}}>
                       고급
                     </div>
@@ -2621,6 +2708,11 @@ bgRGB(t, P){
                       <span style={{fontSize:"11.5px",color:"var(--color-neutral-500)",lineHeight:"1.5"}}>
                         Python 모델은 remark_ws_server2.py 실행이 필요합니다 (ws://localhost:8765). 연결 전이거나 끊기면 자동으로 포먼트 분석으로 대체됩니다.
                       </span>
+                      {v.srWarnMsg ? (
+                        <span style={{fontSize:"11.5px",color:"var(--color-accent-2-700)",lineHeight:"1.5"}}>
+                          {v.srWarnMsg}
+                        </span>
+                      ) : null}
                     </div>
                     <label style={{display:"flex",flexDirection:"column",gap:"6px"}}>
                       <span style={{display:"flex",justifyContent:"space-between"}}>

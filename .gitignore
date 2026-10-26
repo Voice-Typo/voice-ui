@@ -6,3 +6,12 @@ Claude outputs/
 *.log
 .DS_Store
 Thumbs.db
+
+# 환경변수(서버 주소·토큰 등)
+.env
+.env.*
+!.env.example
+
+# 참가자 녹음은 동의 범위가 "연구용 PC 로컬 저장"이다. 레포에 들어가면 동의 위반.
+*.wav
+*.flac

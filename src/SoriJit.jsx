@@ -595,6 +595,10 @@ export default class SoriJit extends React.Component {
   CLAP_RISE = 0.18;        // 직전 프레임 대비 level 상승폭. 박수는 어택이 급격하다
   CLAP_FLAT = 0.25;        // 평탄도. 박수는 충격음이라 배음 구조가 없다 (바람과 같은 기준)
   CLAP_COOLDOWN_MS = 600;  // 연타·반향으로 연달아 터지는 것을 막는다
+  // 박수 직전 ~200ms 구간이 문턱*CLAP_QUIET 이하로 '진짜 조용'해야 한다. 모음 꼬리의 숨소리는
+  // 이미 크던 소리가 잦아드는 것이라 직전이 조용했을 리 없음 — 이걸로 박수와 갈린다.
+  // 진짜 박수를 놓치는 쪽이면(현장 소음이 있어 완전히 조용할 틈이 없다면) 이 값을 올릴 것.
+  CLAP_QUIET = 0.6;
 
   // 300~3000Hz 를 450Hz 폭으로 나눠 각 대역의 스펙트럼 평탄도(기하평균/산술평균)를 에너지 가중 평균.
   // 대역 폭이 배음 간격(f0 ≤ 300Hz)보다 넓어 모음은 봉우리 때문에 낮고, 잡음은 포먼트 모양이어도
@@ -688,18 +692,42 @@ export default class SoriJit extends React.Component {
       if(breathy){ if(!this._blowT0) this._blowT0 = now; } else this._blowT0 = 0;
       const blowing = breathy && now - this._blowT0 > this.BLOW_HOLD_MS;
       const windT = blowing ? Math.min(1, 0.45 + this.loudNorm(this.rawRms)*0.6) : 0;
+      const _prevWindK = this.windK;
       this.windK += (windT - this.windK)*Math.min(1, dt/(windT > this.windK ? 60 : 220));
+      // ⚠️ 임시 튜닝용 진단 로그 — windK 가 0.3 을 상향 돌파하는 순간만 찍는다. 전시 끝나면 지울 것.
+      if(_prevWindK < 0.3 && this.windK >= 0.3){
+        console.log('[breath]', { breathK:+this.breathK.toFixed(3), level:+level.toFixed(3) });
+      }
       // ── 박수 감지: 짧고 크고 광대역이며 어택이 급격한 소리 ── 바람과 반대로 지속이 아니라
       // 직전 프레임 대비 급상승(CLAP_RISE)을 본다. 평탄도 기준(CLAP_FLAT)은 바람과 동일.
       // ⚠️ 문 닫는 소리·물건 떨어지는 소리·마이크를 건드리는 소리도 똑같이 걸린다 — 전시장에서
       // 오작동 소지가 있음. CLAP_GAIN(크기)·CLAP_RISE(어택 급격함)를 올리면 둔감(놓침↑, 오작동↓),
       // 내리면 민감(오작동↑, 놓침↓) — 현장에서 조정할 때는 이 둘을 건드릴 것.
+      // ⚠️ 모음 꼬리(숨소리)는 breathK·level 상승폭 조건을 그대로 통과해 발화가 끝나는 순간 오발동했다.
+      // CLAP_QUIET(직전이 진짜 조용했는지)과 pitch<=0 을 더해 '조용함에서 솟아오름'만 박수로 본다.
       const prevLevel = this._prevLevel != null ? this._prevLevel : level;
+      const _levelHist = this._levelHist || (this._levelHist = []);
+      // 현재 프레임 제외, 직전 ~200ms 의 level 최댓값
+      const prevWindowMax = _levelHist.length ? Math.max(..._levelHist.map(h=>h.lvl)) : 0;
+      const _rise = level - prevLevel;
+      const _loudPass = level > this.state.thresh*this.CLAP_GAIN;
+      const _risePass = _rise > this.CLAP_RISE;
+      const _quietPass = prevWindowMax < this.state.thresh*this.CLAP_QUIET;
+      const _flatPass = this.breathK > this.CLAP_FLAT;
+      const _pitchPass = pitch <= 0;
+      const _cooldownPass = now - (this._lastClapT || -1e9) > this.CLAP_COOLDOWN_MS;
       const isClap = !this.demo && !this.state.calibrating
-        && level > this.state.thresh*this.CLAP_GAIN
-        && (level - prevLevel) > this.CLAP_RISE
-        && this.breathK > this.CLAP_FLAT
-        && now - (this._lastClapT || -1e9) > this.CLAP_COOLDOWN_MS;
+        && _loudPass && _risePass && _quietPass && _flatPass && _pitchPass && _cooldownPass;
+      // ⚠️ 임시 튜닝용 진단 로그 — CLAP_FLAT/BREATH_FLAT(0.25) 는 합성 신호 기준(모음 ≤0.06, 입김 ≥0.34)이라
+      // 실제 마이크 값이 다를 수 있다. 전시 끝나면 지울 것. 크기+어택이 통과한 경우만(근접 미스 포함) 찍고
+      // CLAP_COOLDOWN_MS 당 한 번으로 제한해 콘솔이 넘치지 않게 한다.
+      if(!this.demo && _loudPass && _risePass && now - (this._lastClapLogT || -1e9) > this.CLAP_COOLDOWN_MS){
+        this._lastClapLogT = now;
+        const reject = isClap ? null
+          : !_quietPass ? 'quiet' : !_flatPass ? 'flat' : !_pitchPass ? 'pitch' : 'cooldown';
+        console.log('[clap]', { breathK:+this.breathK.toFixed(3), level:+level.toFixed(3), rise:+_rise.toFixed(3),
+          prevWindowMax:+prevWindowMax.toFixed(3), pitch, fired:isClap, reject });
+      }
       if(isClap){
         this._lastClapT = now;
         // 한 번의 박수로 전부 같은 프레임에 터지면 오류처럼 보이므로 0~260ms 로 흩뜬다
@@ -707,6 +735,9 @@ export default class SoriJit extends React.Component {
         for(const b of this.bubbles){ if(!b.dead && b.popAt === undefined) b.popAt = now + Math.random()*260; }
       }
       this._prevLevel = level;
+      // 박수 직전 '조용함' 판정용 세기 기록 — 박수가 터지든 말든 매 프레임 쌓는다 (200ms 창)
+      _levelHist.push({t:now, lvl:level});
+      this._levelHist = _levelHist.filter(h => now - h.t < 200);
       this.smoothLvl += (level - this.smoothLvl)*0.25;
       // 크기 전용 세기 — dB 로그 매핑(클리핑 없음). 미터·배경이 쓰는 smoothLvl 과 분리한다.
       const sizeRaw = this.demo ? Math.max(0, Math.min(1, level)) : this.loudNorm(this.rawRms);

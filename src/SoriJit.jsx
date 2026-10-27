@@ -562,10 +562,10 @@ export default class SoriJit extends React.Component {
 
   // ── dB 크기 매핑 (voicetypo_ui 에서 이식) : 선형 rms 는 웬만한 발성이 다 최대로 클립됐다 ──
   SIZE_DB_LO = -50; SIZE_DB_HI = -18; SIZE_DB_HEAD = 12;   // dB 구간 (속삭임~또렷~절대최대)
-  SIZE_R_MIN = 10; SIZE_R_NOM = 70; SIZE_FILL = 0.22; SIZE_GAMMA = 1.0;
+  SIZE_R_MIN = 10; SIZE_R_NOM = 70; SIZE_FILL = 0.18; SIZE_GAMMA = 1.0;
   // SIZE_FILL: 헤드룸(-18dBFS 초과) 구간에서 방울이 커질 수 있는 상한을 화면 짧은 변 대비 비율로 정한다.
   // 0.44 였을 때 1080 화면에서 반지름 475px(지름 950px)까지 커져 여러 개가 뜨면 화면이 막혔다.
-  // 0.22 면 반지름 238px. 더 줄이려면 이 값만 낮추면 된다(0.15~0.25 사이에서 맞춰볼 것).
+  // 0.18 이면 1080 화면에서 반지름 194px. 더 줄이려면 이 값만 낮추면 된다(0.12~0.22 사이).
   LVL_ATTACK = 0.2;   // 크기 커질 때 추종
   LVL_RELEASE = 0;    // 줄어들 때 0 = 완전 피크 홀드
   LVL_ADAPT = 0.12;    // 세기 기준(lvlRef)이 화자를 따라가는 속도(1/초) — BASE_ADAPT 와 같은 느낌으로, 발성 중에만, 아주 느리게

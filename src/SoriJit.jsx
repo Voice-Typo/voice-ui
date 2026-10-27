@@ -559,7 +559,10 @@ export default class SoriJit extends React.Component {
 
   // ── dB 크기 매핑 (voicetypo_ui 에서 이식) : 선형 rms 는 웬만한 발성이 다 최대로 클립됐다 ──
   SIZE_DB_LO = -50; SIZE_DB_HI = -18; SIZE_DB_HEAD = 12;   // dB 구간 (속삭임~또렷~절대최대)
-  SIZE_R_MIN = 10; SIZE_R_NOM = 70; SIZE_FILL = 0.44; SIZE_GAMMA = 1.0;
+  SIZE_R_MIN = 10; SIZE_R_NOM = 70; SIZE_FILL = 0.22; SIZE_GAMMA = 1.0;
+  // SIZE_FILL: 헤드룸(-18dBFS 초과) 구간에서 방울이 커질 수 있는 상한을 화면 짧은 변 대비 비율로 정한다.
+  // 0.44 였을 때 1080 화면에서 반지름 475px(지름 950px)까지 커져 여러 개가 뜨면 화면이 막혔다.
+  // 0.22 면 반지름 238px. 더 줄이려면 이 값만 낮추면 된다(0.15~0.25 사이에서 맞춰볼 것).
   LVL_ATTACK = 0.2;   // 크기 커질 때 추종
   LVL_RELEASE = 0;    // 줄어들 때 0 = 완전 피크 홀드
 
@@ -580,6 +583,28 @@ export default class SoriJit extends React.Component {
       r += (rMax - this.SIZE_R_NOM) * u * u;
     }
     return r * this.state.sizeMul;
+  }
+
+  BLOW_HOLD_MS = 180;   // 이만큼 이어져야 입김(바람)으로 인정
+  BLOW_GAIN = 1.3;      // 발성 문턱(thresh)의 몇 배 이상이어야 하나
+  windK = 0;            // 현재 바람 세기 0~1
+  BREATH_FLAT = 0.25;   // 부분대역 평탄도가 이보다 크면 입김(잡음)으로 본다. 합성 검증: 모음 ≤0.06, 입김 ≥0.34
+  breathK = 0;
+
+  // 300~3000Hz 를 450Hz 폭으로 나눠 각 대역의 스펙트럼 평탄도(기하평균/산술평균)를 에너지 가중 평균.
+  // 대역 폭이 배음 간격(f0 ≤ 300Hz)보다 넓어 모음은 봉우리 때문에 낮고, 잡음은 포먼트 모양이어도
+  // 대역 안에선 평평해서 높다. 전 대역 한 번에 재면 '우' 모양 입김이 모음과 구분되지 않는다.
+  breathiness(){
+    const f = this.fbuf, binHz = this.ac.sampleRate/this.an.fftSize;
+    let num = 0, den = 0;
+    for(let lo=300; lo<3000; lo+=450){
+      const i0 = Math.floor(lo/binHz), i1 = Math.floor((lo+450)/binHz);
+      let lg = 0, ar = 0;
+      for(let i=i0;i<i1;i++){ const p = Math.pow(10, (f[i] > -200 ? f[i] : -200)/10) + 1e-20; lg += Math.log(p); ar += p; }
+      const n = i1 - i0, fl = Math.exp(lg/n)/(ar/n);
+      num += fl*ar; den += ar;
+    }
+    return den > 0 ? num/den : 0;
   }
 
   classifyVowel(){
@@ -630,6 +655,11 @@ export default class SoriJit extends React.Component {
       level = Math.min(1, this.rawRms*9*this.state.sens);
       // Python 인식 WS 가 신선하면 피치는 YIN(Python) 값 우선 (없으면 브라우저 autoCorrelate 유지)
       if(this.state.useRecogWS && this.recogFresh(now) && this.wsFrame.f0 != null) pitch = this.wsFrame.f0;
+      // 입김 거부: 바람 소리의 저역 웅웅거림은 자기상관에 가짜 주기를 만들어 모음으로 새어 들어온다.
+      // 부분대역 평탄도가 높으면(배음 봉우리 없는 잡음) 피치를 지우고 발성 여유(lastF0T)도 끊는다.
+      // WS f0 덮어쓰기 뒤에 둬야 서버 쪽 가짜 f0 도 함께 막힌다.
+      this.breathK += (this.breathiness() - this.breathK)*0.5;
+      if(this.rawRms > 0.004 && this.breathK > this.BREATH_FLAT){ pitch = -1; this.lastF0T = -1e9; }
       }
       if(this.calibEnd){
         this.calibMax = Math.max(this.calibMax, level);
@@ -646,6 +676,14 @@ export default class SoriJit extends React.Component {
       const voiced = level > this.state.thresh && !this.state.calibrating && (now - (this.lastF0T||-1e9) < 250);
       const _useWS = this.state.useRecogWS && !this.demo && this.recogFresh(now);
       if(voiced) vowel = this.demo ? demoV : (_useWS ? this.wsFrame.vowel : this.classifyVowel());
+      // ── 바람(후~) 감지: 피치 없는 큰 소리가 BLOW_HOLD_MS 이상 이어지면 입김으로 본다 ──
+      // 박수·타자는 짧아서 지속 조건에 걸러진다. 세기만큼 바람이 세지고(windK 0~1),
+      // 방울은 drawSceneSource 에서 막대 고리 반대쪽으로 날려 화면 밖에서 사라진다.
+      const breathy = !this.demo && !this.state.calibrating && pitch <= 0 && level > this.state.thresh*this.BLOW_GAIN;
+      if(breathy){ if(!this._blowT0) this._blowT0 = now; } else this._blowT0 = 0;
+      const blowing = breathy && now - this._blowT0 > this.BLOW_HOLD_MS;
+      const windT = blowing ? Math.min(1, 0.45 + this.loudNorm(this.rawRms)*0.6) : 0;
+      this.windK += (windT - this.windK)*Math.min(1, dt/(windT > this.windK ? 60 : 220));
       this.smoothLvl += (level - this.smoothLvl)*0.25;
       // 크기 전용 세기 — dB 로그 매핑(클리핑 없음). 미터·배경이 쓰는 smoothLvl 과 분리한다.
       const sizeRaw = this.demo ? Math.max(0, Math.min(1, level)) : this.loudNorm(this.rawRms);
@@ -1240,7 +1278,34 @@ bgRGB(t, P){
       const age = now-b.born;
       const rad = this.bubbleW(b)/2*.75;
       if(!this.state.freeze){
-      if(b.rising){
+      // 바람: 막대 고리에서 바깥쪽으로 밀어낸 뒤 터뜨린다. 한 번 밀린 방울은 벽에 튕기지 않는다.
+      // 화면 밖으로 흘려보내는 방식은 1080 화면에서 최소 3.6초가 걸려, 혼잡을 치우려는
+      // 목적에 너무 느렸다. 밀리는 동작은 남기되(즉시 사라지면 오류처럼 보인다) 곧 터지게 한다.
+      const wind = this.state.running ? this.windK : 0;
+      if(!b.dead && (wind > 0.05 || b.blown)){
+        const dx = b.x - ax, dy = b.y - ay, dl = Math.hypot(dx, dy) || 1;
+        const k = wind*0.55*dt/16;
+        b.vx += (dx/dl)*k; b.vy += (dy/dl)*k - k*0.25;   // 살짝 위로 띄워 날린다
+        if(wind > 0.3 && !b.blown){
+          b.blown = true;
+          // 밀린 뒤 곧 터진다. 전부 같은 프레임에 사라지면 오류처럼 보이므로 120~500ms 로
+          // 흩뜨려, 한 번의 입김이 연쇄로 번지는 것처럼 읽히게 한다.
+          b.popAt = now + 120 + Math.random()*380;
+        }
+      }
+      if(b.blown && !b.dead){
+        if(b.popAt !== undefined && now >= b.popAt){
+          this.killBubble(b, now);                       // 기존 터짐 연출(잔해 기포 포함)을 그대로 쓴다
+        } else {
+          b.rising = false;
+          b.vx *= .997; b.vy *= .997;
+          const sp = Math.hypot(b.vx, b.vy);
+          if(sp < 2.5){ const s = 2.5/(sp || 1); b.vx *= s; b.vy *= s; }   // 바람이 멎어도 멈추지 않는다
+          b.x += b.vx; b.y += b.vy;
+          // 터지기 전에 화면을 벗어난 경우의 안전판
+          if(b.x < -rad*2 || b.x > W+rad*2 || b.y < -rad*2 || b.y > H+rad*2) b.gone = true;
+        }
+      } else if(b.rising){
         b.y += b.vy; b.x += b.vx; b.vy *= .992;
         // 상승 중에도 좌우 벽에서 튕김
         if(b.x < rad){ b.x = rad; b.vx = Math.abs(b.vx); b.wallDir = 1; }
@@ -1358,6 +1423,22 @@ bgRGB(t, P){
 
     // 잔해 기포: 터진 비눗방울의 작은 기포들이 화면을 둥둥 떠다님
     for(const rm of this.remnants){
+      // 잔해 기포도 바람에 함께 날아간다
+      const windR = this.state.running ? this.windK : 0;
+      if(windR > 0.05 || rm.blown){
+        const dx = rm.x - ax, dy = rm.y - ay, dl = Math.hypot(dx, dy) || 1;
+        const k = windR*0.8*dt/16;
+        rm.vx += (dx/dl)*k; rm.vy += (dy/dl)*k - k*0.25;
+        if(windR > 0.3) rm.blown = true;
+      }
+      if(rm.blown){
+        rm.x += rm.vx; rm.y += rm.vy;
+        if(Math.hypot(rm.vx, rm.vy) < 2){ rm.vx *= 1.05; rm.vy = rm.vy*1.05 - .05; }
+        if(rm.x < -rm.r*2 || rm.x > W+rm.r*2 || rm.y < -rm.r*2 || rm.y > H+rm.r*2){ rm.gone = true; continue; }
+        ctx.save(); ctx.globalAlpha = .75; this._gl3dOwner = rm;
+        this.drawSoapCircle(ctx, rm.x, rm.y, rm.r, 1, now, .3, rm.phase, null);
+        ctx.restore(); continue;
+      }
       rm.vx *= .985; rm.vy *= .985;
       rm.x += rm.vx + Math.sin(now/900+rm.phase)*.3;
       rm.y += rm.vy + Math.cos(now/1100+rm.phase)*.2;
@@ -2436,7 +2517,7 @@ bgRGB(t, P){
     const bs = this.bubbles;
     for(let i=0;i<bs.length;i++) for(let j=i+1;j<bs.length;j++){
       const a=bs[i], b=bs[j];
-      if(a.gone||b.gone||a.rising||b.rising||a.dead||b.dead) continue;
+      if(a.gone||b.gone||a.rising||b.rising||a.dead||b.dead||a.blown||b.blown) continue;
       const ra=this.bubbleW(a)/2, rb=this.bubbleW(b)/2;
       const dx=b.x-a.x, dy=b.y-a.y, d=Math.hypot(dx,dy);
       if(d > (ra+rb)*.95 || d===0) continue;

@@ -339,6 +339,9 @@ export default class SoriJit extends React.Component {
   recogFresh(now){ return !!(this.wsFrame && (now - this.wsFrame.t) < RECOG_STALE_MS); }
 
   start = async ()=>{
+    // 새 관람객의 세션 시작점 — 이전 사람의 피치·세기 기준이 남아있지 않도록 여기서 초기화한다.
+    // (새로고침으로도 리셋되지만, 리로드 없이 마이크를 다시 켜는 경로가 생기더라도 안전하게.)
+    this.pitchAvg = undefined; this.lvlRef = undefined; this._voicedMs = 0;
     try{
       this.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:1}});
       // RE:MARK 수집기(recorder.ts)와 동일한 검증 — 요청만으로는 부족하고 실제로 꺼졌는지 getSettings() 로 확인한다.
@@ -565,13 +568,20 @@ export default class SoriJit extends React.Component {
   // 0.22 면 반지름 238px. 더 줄이려면 이 값만 낮추면 된다(0.15~0.25 사이에서 맞춰볼 것).
   LVL_ATTACK = 0.2;   // 크기 커질 때 추종
   LVL_RELEASE = 0;    // 줄어들 때 0 = 완전 피크 홀드
+  LVL_ADAPT = 0.12;    // 세기 기준(lvlRef)이 화자를 따라가는 속도(1/초) — BASE_ADAPT 와 같은 느낌으로, 발성 중에만, 아주 느리게
 
   // rms → 정규화 세기 (0~1 일상, 1~2 헤드룸)
+  // 피치처럼 세기도 화자 고유 기준(lvlRef)에 상대적으로 잰다 — 절대 dB 고정 앵커였을 때는
+  // 목소리가 큰 사람이 평소 톤으로만 말해도 항상 헤드룸(거의 최대 크기)에 들어가 버렸다.
+  // 기준이 자리잡을 때까지는 워밍업 중립값을 쓴다 (PITCH_REF_MS, 아래 pitchTone 과 동일한 게이트).
   loudNorm(rms){
+    if((this._voicedMs||0) < this.PITCH_REF_MS) return 1.0; // 기준 미확정: 누구나 '또렷'(SIZE_R_NOM) 크기로 통일
     const L = 20*Math.log10(Math.max(rms, 1e-7));
-    const t = (L - this.SIZE_DB_LO) / (this.SIZE_DB_HI - this.SIZE_DB_LO);
+    const hi = (this.lvlRef != null) ? this.lvlRef : this.SIZE_DB_HI; // 화자 기준이 '또렷' 지점을 대신한다
+    const lo = hi - (this.SIZE_DB_HI - this.SIZE_DB_LO);               // 기준 아래 32dB 폭은 그대로 유지
+    const t = (L - lo) / (hi - lo);
     if(t <= 1) return Math.max(0, t);
-    return 1 + Math.min(1, (L - this.SIZE_DB_HI) / this.SIZE_DB_HEAD);
+    return 1 + Math.min(1, (L - hi) / this.SIZE_DB_HEAD);
   }
   // 정규화 세기 → 반지름(px)
   segRadius(lvl){
@@ -707,6 +717,17 @@ export default class SoriJit extends React.Component {
         if(!(this.pitchAvg>0)) this.pitchAvg = pitch;
         else this.pitchAvg += (pitch - this.pitchAvg)*Math.min(1, dt/1000*this.BASE_ADAPT);
         this.pitchAvg = Math.max(70, Math.min(400, this.pitchAvg));
+        // 세기 기준(dB)도 같은 조건·같은 속도로 화자 고유값에 수렴시킨다 — 피치와 동일 패턴.
+        // demo 는 실제 dB(rawRms) 가 없어(합성 level 뿐) 생략.
+        if(!this.demo){
+          const lvlNow = 20*Math.log10(Math.max(this.rawRms, 1e-7));
+          if(this.lvlRef == null) this.lvlRef = lvlNow;
+          else this.lvlRef += (lvlNow - this.lvlRef)*Math.min(1, dt/1000*this.LVL_ADAPT);
+          this.lvlRef = Math.max(-60, Math.min(-6, this.lvlRef));
+        }
+        // 기준(피치·세기)이 자리잡았다고 볼 만한 '누적 발성 시간' — 워밍업 게이트(색·크기)가 이걸로 푼다.
+        // demo 에서도 이 분기를 타므로(위 if 공유) 데모 색상이 영원히 중립에 묶이지 않는다.
+        this._voicedMs = (this._voicedMs||0) + dt;
       }
       // f0 표본 적재 — WS 모드에선 '새 프레임일 때만' 담는다 (같은 값 중복 적재 → 스펙트럼 왜곡 방지)
       if(pitch>0){
@@ -876,10 +897,15 @@ export default class SoriJit extends React.Component {
   PITCH_SPAN = 3.0;      // 반음. 기준에서 ±3.0반음이면 가시광선 양 끝  ※ 4.5 → 3.0: 낮은 소리가 중간색에서 못 벗어나던 문제로 민감도 상향
   BASE_ADAPT = 0.12;     // 기준음이 화자를 따라가는 속도(1/초) — 발성 중에만, 아주 느리게
   PITCH_HZ = 150;        // (구 매핑 잔재 — 더는 쓰지 않는다)
+  // 피치·세기 기준(pitchAvg/lvlRef)이 안정됐다고 볼 만큼의 누적 발성 시간(ms). 이 미만에서는
+  // 아직 안 굳은 기준에 상대적인 값을 보여주는 대신 중립값을 낸다 — 첫 발화에서 색이 기준이
+  // 안 잡힌 채로 요동치는 것을 막는다.
+  PITCH_REF_MS = 1200;
   pitchCenter(){ return this.pitchAvg > 0 ? this.pitchAvg : (this.state.basePitch || 190); }
   pitchTone(p){
     const base = this.pitchCenter();
     if(!(p > 0) || !(base > 0)) return 0;
+    if((this._voicedMs||0) < this.PITCH_REF_MS) return 0; // 기준 미확정: 누구나 중간색(연두)
     return Math.max(-1, Math.min(1, 12*Math.log2(p/base)/this.PITCH_SPAN));
   }
   // ── 버블6 규칙: 음정 → 글자의 '입체' 회전 속도 ──

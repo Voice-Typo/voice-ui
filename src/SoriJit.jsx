@@ -591,6 +591,11 @@ export default class SoriJit extends React.Component {
   BREATH_FLAT = 0.25;   // 부분대역 평탄도가 이보다 크면 입김(잡음)으로 본다. 합성 검증: 모음 ≤0.06, 입김 ≥0.34
   breathK = 0;
 
+  CLAP_GAIN = 2.2;         // 발성 문턱 대비 최소 크기. 바람(1.3)보다 높게 잡아 오작동을 줄인다
+  CLAP_RISE = 0.18;        // 직전 프레임 대비 level 상승폭. 박수는 어택이 급격하다
+  CLAP_FLAT = 0.25;        // 평탄도. 박수는 충격음이라 배음 구조가 없다 (바람과 같은 기준)
+  CLAP_COOLDOWN_MS = 600;  // 연타·반향으로 연달아 터지는 것을 막는다
+
   // 300~3000Hz 를 450Hz 폭으로 나눠 각 대역의 스펙트럼 평탄도(기하평균/산술평균)를 에너지 가중 평균.
   // 대역 폭이 배음 간격(f0 ≤ 300Hz)보다 넓어 모음은 봉우리 때문에 낮고, 잡음은 포먼트 모양이어도
   // 대역 안에선 평평해서 높다. 전 대역 한 번에 재면 '우' 모양 입김이 모음과 구분되지 않는다.
@@ -684,6 +689,24 @@ export default class SoriJit extends React.Component {
       const blowing = breathy && now - this._blowT0 > this.BLOW_HOLD_MS;
       const windT = blowing ? Math.min(1, 0.45 + this.loudNorm(this.rawRms)*0.6) : 0;
       this.windK += (windT - this.windK)*Math.min(1, dt/(windT > this.windK ? 60 : 220));
+      // ── 박수 감지: 짧고 크고 광대역이며 어택이 급격한 소리 ── 바람과 반대로 지속이 아니라
+      // 직전 프레임 대비 급상승(CLAP_RISE)을 본다. 평탄도 기준(CLAP_FLAT)은 바람과 동일.
+      // ⚠️ 문 닫는 소리·물건 떨어지는 소리·마이크를 건드리는 소리도 똑같이 걸린다 — 전시장에서
+      // 오작동 소지가 있음. CLAP_GAIN(크기)·CLAP_RISE(어택 급격함)를 올리면 둔감(놓침↑, 오작동↓),
+      // 내리면 민감(오작동↑, 놓침↓) — 현장에서 조정할 때는 이 둘을 건드릴 것.
+      const prevLevel = this._prevLevel != null ? this._prevLevel : level;
+      const isClap = !this.demo && !this.state.calibrating
+        && level > this.state.thresh*this.CLAP_GAIN
+        && (level - prevLevel) > this.CLAP_RISE
+        && this.breathK > this.CLAP_FLAT
+        && now - (this._lastClapT || -1e9) > this.CLAP_COOLDOWN_MS;
+      if(isClap){
+        this._lastClapT = now;
+        // 한 번의 박수로 전부 같은 프레임에 터지면 오류처럼 보이므로 0~260ms 로 흩뜬다
+        // (입김의 120~500ms 보다 좁게 — 박수는 순간적인 소리라 번지는 느낌도 더 짧아야 한다)
+        for(const b of this.bubbles){ if(!b.dead && b.popAt === undefined) b.popAt = now + Math.random()*260; }
+      }
+      this._prevLevel = level;
       this.smoothLvl += (level - this.smoothLvl)*0.25;
       // 크기 전용 세기 — dB 로그 매핑(클리핑 없음). 미터·배경이 쓰는 smoothLvl 과 분리한다.
       const sizeRaw = this.demo ? Math.max(0, Math.min(1, level)) : this.loudNorm(this.rawRms);
@@ -1278,33 +1301,27 @@ bgRGB(t, P){
       const age = now-b.born;
       const rad = this.bubbleW(b)/2*.75;
       if(!this.state.freeze){
-      // 바람: 막대 고리에서 바깥쪽으로 밀어낸 뒤 터뜨린다. 한 번 밀린 방울은 벽에 튕기지 않는다.
-      // 화면 밖으로 흘려보내는 방식은 1080 화면에서 최소 3.6초가 걸려, 혼잡을 치우려는
-      // 목적에 너무 느렸다. 밀리는 동작은 남기되(즉시 사라지면 오류처럼 보인다) 곧 터지게 한다.
+      // 박수로 예약된 터짐: 상승/부유/바람에 밀린 상태 어디서든 b.popAt 이 되면 터진다.
+      // killBubble 이 b.dead 를 세우고, 바로 아래 바람·blown 분기가 모두 !b.dead 로
+      // 막혀 있어 같은 프레임에 killBubble 이 두 번 불릴 일은 없다.
+      if(b.popAt !== undefined && !b.dead && now >= b.popAt) this.killBubble(b, now);
+      // 바람: 막대 고리에서 바깥쪽으로 밀어내 화면 밖으로 흘려보낸다. 한 번 밀린 방울은
+      // 벽에 튕기지 않고 그대로 날아간다 — 입김은 지속되는 소리라 밀림도 지속된다.
       const wind = this.state.running ? this.windK : 0;
       if(!b.dead && (wind > 0.05 || b.blown)){
         const dx = b.x - ax, dy = b.y - ay, dl = Math.hypot(dx, dy) || 1;
         const k = wind*0.55*dt/16;
         b.vx += (dx/dl)*k; b.vy += (dy/dl)*k - k*0.25;   // 살짝 위로 띄워 날린다
-        if(wind > 0.3 && !b.blown){
-          b.blown = true;
-          // 밀린 뒤 곧 터진다. 전부 같은 프레임에 사라지면 오류처럼 보이므로 120~500ms 로
-          // 흩뜨려, 한 번의 입김이 연쇄로 번지는 것처럼 읽히게 한다.
-          b.popAt = now + 120 + Math.random()*380;
-        }
+        if(wind > 0.3) b.blown = true;
       }
       if(b.blown && !b.dead){
-        if(b.popAt !== undefined && now >= b.popAt){
-          this.killBubble(b, now);                       // 기존 터짐 연출(잔해 기포 포함)을 그대로 쓴다
-        } else {
-          b.rising = false;
-          b.vx *= .997; b.vy *= .997;
-          const sp = Math.hypot(b.vx, b.vy);
-          if(sp < 2.5){ const s = 2.5/(sp || 1); b.vx *= s; b.vy *= s; }   // 바람이 멎어도 멈추지 않는다
-          b.x += b.vx; b.y += b.vy;
-          // 터지기 전에 화면을 벗어난 경우의 안전판
-          if(b.x < -rad*2 || b.x > W+rad*2 || b.y < -rad*2 || b.y > H+rad*2) b.gone = true;
-        }
+        b.rising = false;
+        b.vx *= .997; b.vy *= .997;
+        const sp = Math.hypot(b.vx, b.vy);
+        if(sp < 2.5){ const s = 2.5/(sp || 1); b.vx *= s; b.vy *= s; }   // 바람이 멎어도 멈추지 않는다
+        b.x += b.vx; b.y += b.vy;
+        // 화면을 벗어나면 사라진다
+        if(b.x < -rad*2 || b.x > W+rad*2 || b.y < -rad*2 || b.y > H+rad*2) b.gone = true;
       } else if(b.rising){
         b.y += b.vy; b.x += b.vx; b.vy *= .992;
         // 상승 중에도 좌우 벽에서 튕김

@@ -585,20 +585,18 @@ export default class SoriJit extends React.Component {
     return r * this.state.sizeMul;
   }
 
-  BLOW_HOLD_MS = 180;   // 이만큼 이어져야 입김(바람)으로 인정
-  BLOW_GAIN = 1.3;      // 발성 문턱(thresh)의 몇 배 이상이어야 하나
+  // 전시장(갤러리) 기준 — 마이크 바로 치지 않는 한 발화 문턱보다 또렷이 커야 바람으로 인정한다.
+  BLOW_HOLD_MS = 250;   // 이만큼 이어져야 입김(바람)으로 인정 (180→250, 전시장 잡음 대비 보수화)
+  BLOW_GAIN = 1.8;       // 발성 문턱(thresh)의 몇 배 이상이어야 하나 (1.3→1.8, 발성 문턱보다 확실히
+                         // 커야 하지 근소하게 넘는 정도면 안 됨 — 관람객 말소리·현장 소음 오작동 방지)
+  // ⚠️ 갤러리 잡음에 대한 실제 방어선은 이 두 값이 아니라 thresh 자체다. 지속적인 주변 소음은
+  // 정의상 '지속'이므로 BLOW_HOLD_MS 로는 걸러지지 않는다 — 걸러주는 건 UI의 "주변 소음 자동
+  // 측정"(calibrateNoise())이 thresh 를 실측한 소음 바닥 위에 놓는다는 것. 즉 이 보정을 전시장
+  // '안에서' 실행해야만 위 문턱들이 의미를 갖는다.
   windK = 0;            // 현재 바람 세기 0~1
+  // 실제 마이크로 측정한 값이 아직 없어 — 다시 추측하는 게 측정하는 것보다 나쁘므로 당분간 유지.
   BREATH_FLAT = 0.25;   // 부분대역 평탄도가 이보다 크면 입김(잡음)으로 본다. 합성 검증: 모음 ≤0.06, 입김 ≥0.34
   breathK = 0;
-
-  CLAP_GAIN = 2.2;         // 발성 문턱 대비 최소 크기. 바람(1.3)보다 높게 잡아 오작동을 줄인다
-  CLAP_RISE = 0.18;        // 직전 프레임 대비 level 상승폭. 박수는 어택이 급격하다
-  CLAP_FLAT = 0.25;        // 평탄도. 박수는 충격음이라 배음 구조가 없다 (바람과 같은 기준)
-  CLAP_COOLDOWN_MS = 600;  // 연타·반향으로 연달아 터지는 것을 막는다
-  // 박수 직전 ~200ms 구간이 문턱*CLAP_QUIET 이하로 '진짜 조용'해야 한다. 모음 꼬리의 숨소리는
-  // 이미 크던 소리가 잦아드는 것이라 직전이 조용했을 리 없음 — 이걸로 박수와 갈린다.
-  // 진짜 박수를 놓치는 쪽이면(현장 소음이 있어 완전히 조용할 틈이 없다면) 이 값을 올릴 것.
-  CLAP_QUIET = 0.6;
 
   // 300~3000Hz 를 450Hz 폭으로 나눠 각 대역의 스펙트럼 평탄도(기하평균/산술평균)를 에너지 가중 평균.
   // 대역 폭이 배음 간격(f0 ≤ 300Hz)보다 넓어 모음은 봉우리 때문에 낮고, 잡음은 포먼트 모양이어도
@@ -698,46 +696,6 @@ export default class SoriJit extends React.Component {
       if(_prevWindK < 0.3 && this.windK >= 0.3){
         console.log('[breath]', { breathK:+this.breathK.toFixed(3), level:+level.toFixed(3) });
       }
-      // ── 박수 감지: 짧고 크고 광대역이며 어택이 급격한 소리 ── 바람과 반대로 지속이 아니라
-      // 직전 프레임 대비 급상승(CLAP_RISE)을 본다. 평탄도 기준(CLAP_FLAT)은 바람과 동일.
-      // ⚠️ 문 닫는 소리·물건 떨어지는 소리·마이크를 건드리는 소리도 똑같이 걸린다 — 전시장에서
-      // 오작동 소지가 있음. CLAP_GAIN(크기)·CLAP_RISE(어택 급격함)를 올리면 둔감(놓침↑, 오작동↓),
-      // 내리면 민감(오작동↑, 놓침↓) — 현장에서 조정할 때는 이 둘을 건드릴 것.
-      // ⚠️ 모음 꼬리(숨소리)는 breathK·level 상승폭 조건을 그대로 통과해 발화가 끝나는 순간 오발동했다.
-      // CLAP_QUIET(직전이 진짜 조용했는지)과 pitch<=0 을 더해 '조용함에서 솟아오름'만 박수로 본다.
-      const prevLevel = this._prevLevel != null ? this._prevLevel : level;
-      const _levelHist = this._levelHist || (this._levelHist = []);
-      // 현재 프레임 제외, 직전 ~200ms 의 level 최댓값
-      const prevWindowMax = _levelHist.length ? Math.max(..._levelHist.map(h=>h.lvl)) : 0;
-      const _rise = level - prevLevel;
-      const _loudPass = level > this.state.thresh*this.CLAP_GAIN;
-      const _risePass = _rise > this.CLAP_RISE;
-      const _quietPass = prevWindowMax < this.state.thresh*this.CLAP_QUIET;
-      const _flatPass = this.breathK > this.CLAP_FLAT;
-      const _pitchPass = pitch <= 0;
-      const _cooldownPass = now - (this._lastClapT || -1e9) > this.CLAP_COOLDOWN_MS;
-      const isClap = !this.demo && !this.state.calibrating
-        && _loudPass && _risePass && _quietPass && _flatPass && _pitchPass && _cooldownPass;
-      // ⚠️ 임시 튜닝용 진단 로그 — CLAP_FLAT/BREATH_FLAT(0.25) 는 합성 신호 기준(모음 ≤0.06, 입김 ≥0.34)이라
-      // 실제 마이크 값이 다를 수 있다. 전시 끝나면 지울 것. 크기+어택이 통과한 경우만(근접 미스 포함) 찍고
-      // CLAP_COOLDOWN_MS 당 한 번으로 제한해 콘솔이 넘치지 않게 한다.
-      if(!this.demo && _loudPass && _risePass && now - (this._lastClapLogT || -1e9) > this.CLAP_COOLDOWN_MS){
-        this._lastClapLogT = now;
-        const reject = isClap ? null
-          : !_quietPass ? 'quiet' : !_flatPass ? 'flat' : !_pitchPass ? 'pitch' : 'cooldown';
-        console.log('[clap]', { breathK:+this.breathK.toFixed(3), level:+level.toFixed(3), rise:+_rise.toFixed(3),
-          prevWindowMax:+prevWindowMax.toFixed(3), pitch, fired:isClap, reject });
-      }
-      if(isClap){
-        this._lastClapT = now;
-        // 한 번의 박수로 전부 같은 프레임에 터지면 오류처럼 보이므로 0~260ms 로 흩뜬다
-        // (입김의 120~500ms 보다 좁게 — 박수는 순간적인 소리라 번지는 느낌도 더 짧아야 한다)
-        for(const b of this.bubbles){ if(!b.dead && b.popAt === undefined) b.popAt = now + Math.random()*260; }
-      }
-      this._prevLevel = level;
-      // 박수 직전 '조용함' 판정용 세기 기록 — 박수가 터지든 말든 매 프레임 쌓는다 (200ms 창)
-      _levelHist.push({t:now, lvl:level});
-      this._levelHist = _levelHist.filter(h => now - h.t < 200);
       this.smoothLvl += (level - this.smoothLvl)*0.25;
       // 크기 전용 세기 — dB 로그 매핑(클리핑 없음). 미터·배경이 쓰는 smoothLvl 과 분리한다.
       const sizeRaw = this.demo ? Math.max(0, Math.min(1, level)) : this.loudNorm(this.rawRms);
@@ -1332,18 +1290,23 @@ bgRGB(t, P){
       const age = now-b.born;
       const rad = this.bubbleW(b)/2*.75;
       if(!this.state.freeze){
-      // 박수로 예약된 터짐: 상승/부유/바람에 밀린 상태 어디서든 b.popAt 이 되면 터진다.
+      // 바람으로 예약된 터짐: 상승/부유/바람에 밀린 상태 어디서든 b.popAt 이 되면 터진다.
       // killBubble 이 b.dead 를 세우고, 바로 아래 바람·blown 분기가 모두 !b.dead 로
       // 막혀 있어 같은 프레임에 killBubble 이 두 번 불릴 일은 없다.
       if(b.popAt !== undefined && !b.dead && now >= b.popAt) this.killBubble(b, now);
-      // 바람: 막대 고리에서 바깥쪽으로 밀어내 화면 밖으로 흘려보낸다. 한 번 밀린 방울은
-      // 벽에 튕기지 않고 그대로 날아간다 — 입김은 지속되는 소리라 밀림도 지속된다.
+      // 바람: 막대 고리에서 바깥쪽으로 밀어낸 뒤 터뜨린다. 처음 밀리는 순간 popAt 을 120~500ms
+      // 뒤로 걸어 둬 숨을 불어내는 동안 방울들이 번지듯 차례로 터진다 — 즉시 사라지면 렌더링
+      // 결함처럼 보여서다. 밀린 방울은 벽에 튕기지 않고 그대로 날아간다 — 입김은 지속되는
+      // 소리라 밀림도 지속된다. (화면을 완전히 벗어나면 b.gone — fuse 전에 빠져나간 경우의 보험.)
       const wind = this.state.running ? this.windK : 0;
       if(!b.dead && (wind > 0.05 || b.blown)){
         const dx = b.x - ax, dy = b.y - ay, dl = Math.hypot(dx, dy) || 1;
         const k = wind*0.55*dt/16;
         b.vx += (dx/dl)*k; b.vy += (dy/dl)*k - k*0.25;   // 살짝 위로 띄워 날린다
-        if(wind > 0.3) b.blown = true;
+        if(wind > 0.3 && !b.blown){
+          b.blown = true;
+          b.popAt = now + 120 + Math.random()*380;
+        }
       }
       if(b.blown && !b.dead){
         b.rising = false;

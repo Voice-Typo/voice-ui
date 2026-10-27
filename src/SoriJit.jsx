@@ -1193,10 +1193,12 @@ bgRGB(t, P){
           Object.defineProperty(segs,'__layN',{value:n,writable:true,configurable:true}); } catch(e){}
     return out;
   }
+  FLINCH_SCALE = 0.13;  // 터지기 직전 살짝 부푸는 정도 — 실제 비눗방울도 터지기 직전 살짝 부푼다,
+                        // 그걸 흉내낸 것. 올리면 흠칫하는 느낌이 더 커진다.
   bubbleW(b){ // 군집 지름
     const ps=this.layoutSegs(b.segs);
     let R=0; b.segs.forEach((s,i)=>{ R=Math.max(R, Math.hypot(ps[i].x,ps[i].y)+s.r); });
-    return R*2;
+    return R*2*(b.flinch || 1);
   }
 
   // Reflect only the canvas scene. HTML controls and the graph stay unchanged.
@@ -1294,28 +1296,23 @@ bgRGB(t, P){
       // killBubble 이 b.dead 를 세우고, 바로 아래 바람·blown 분기가 모두 !b.dead 로
       // 막혀 있어 같은 프레임에 killBubble 이 두 번 불릴 일은 없다.
       if(b.popAt !== undefined && !b.dead && now >= b.popAt) this.killBubble(b, now);
-      // 바람: 막대 고리에서 바깥쪽으로 밀어낸 뒤 터뜨린다. 처음 밀리는 순간 popAt 을 120~500ms
-      // 뒤로 걸어 둬 숨을 불어내는 동안 방울들이 번지듯 차례로 터진다 — 즉시 사라지면 렌더링
-      // 결함처럼 보여서다. 밀린 방울은 벽에 튕기지 않고 그대로 날아간다 — 입김은 지속되는
-      // 소리라 밀림도 지속된다. (화면을 완전히 벗어나면 b.gone — fuse 전에 빠져나간 경우의 보험.)
+      // 바람: 막대 고리에 걸린 방울은 밀어내지 않는다 — 제자리에서 아주 살짝 흠칫(bubbleW 의
+      // flinch)했다가 바로 터진다. fuse 를 90~180ms 로 짧게 잡아 '즉시'로 읽히게 하면서도,
+      // 전부 같은 프레임에 사라지면 렌더링 결함처럼 보이므로 약간만 흩어 둔다.
+      // (Math.random()*90 항을 없애면 모든 방울이 같은 프레임에 한꺼번에 터진다 — 작가가 띄운
+      // "한꺼번에 팡" 대안은 이 한 줄만 바꾸면 된다.)
       const wind = this.state.running ? this.windK : 0;
-      if(!b.dead && (wind > 0.05 || b.blown)){
-        const dx = b.x - ax, dy = b.y - ay, dl = Math.hypot(dx, dy) || 1;
-        const k = wind*0.55*dt/16;
-        b.vx += (dx/dl)*k; b.vy += (dy/dl)*k - k*0.25;   // 살짝 위로 띄워 날린다
-        if(wind > 0.3 && !b.blown){
-          b.blown = true;
-          b.popAt = now + 120 + Math.random()*380;
-        }
+      if(!b.dead && wind > 0.3 && !b.blown){
+        b.blown = true;
+        b.blownAt = now;
+        b.popAt = now + 90 + Math.random()*90;
       }
       if(b.blown && !b.dead){
-        b.rising = false;
-        b.vx *= .997; b.vy *= .997;
-        const sp = Math.hypot(b.vx, b.vy);
-        if(sp < 2.5){ const s = 2.5/(sp || 1); b.vx *= s; b.vy *= s; }   // 바람이 멎어도 멈추지 않는다
-        b.x += b.vx; b.y += b.vy;
-        // 화면을 벗어나면 사라진다
-        if(b.x < -rad*2 || b.x > W+rad*2 || b.y < -rad*2 || b.y > H+rad*2) b.gone = true;
+        // 밀려나지 않고 제자리에 머문다 — 부풀기(flinch)만 아래에서 갱신하고 터짐은
+        // 위쪽 popAt 체크가 처리한다.
+        const fuse = (b.popAt - b.blownAt) || 1;
+        const t = Math.min(1, Math.max(0, (now - b.blownAt) / fuse));
+        b.flinch = 1 + this.FLINCH_SCALE*t;
       } else if(b.rising){
         b.y += b.vy; b.x += b.vx; b.vy *= .992;
         // 상승 중에도 좌우 벽에서 튕김

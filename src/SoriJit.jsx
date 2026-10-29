@@ -634,6 +634,24 @@ export default class SoriJit extends React.Component {
     return den > 0 ? num/den : 0;
   }
 
+  TONE_LOW_MIN = 0.25;   // 저역 에너지 비율이 이보다 작으면 휘파람 등 목소리 아닌 순음으로 본다
+  toneK = 1;
+
+  // 모음은 '이'까지도 f0 배음이 저역(80~900Hz)에 두껍게 깔리지만, 휘파람 같은 순음은 1~2.5kHz
+  // 부근에 가늘게 몰려 저역이 거의 비어 있다. breathiness()(평탄도)는 순음이 오히려 반대쪽으로
+  // 나와(배음 하나뿐이라 뾰족함) 못 잡으므로, 저역/전체 에너지 비율로 따로 가른다.
+  lowBandRatio(){
+    const f = this.fbuf, binHz = this.ac.sampleRate/this.an.fftSize;
+    const i0 = Math.floor(80/binHz), i1 = Math.floor(900/binHz), i2 = Math.floor(5000/binHz);
+    let lowE = 0, totE = 0;
+    for(let i=i0;i<i2;i++){
+      const p = Math.pow(10, (f[i] > -200 ? f[i] : -200)/10);
+      totE += p;
+      if(i < i1) lowE += p;
+    }
+    return totE > 0 ? lowE/totE : 1;
+  }
+
   classifyVowel(){
     const f = this.fbuf, sr = this.ac.sampleRate, binHz = sr/this.an.fftSize;
     const pow = i => Math.pow(10, (f[i]||-160)/20);
@@ -687,6 +705,17 @@ export default class SoriJit extends React.Component {
       // WS f0 덮어쓰기 뒤에 둬야 서버 쪽 가짜 f0 도 함께 막힌다.
       this.breathK += (this.breathiness() - this.breathK)*0.5;
       if(this.rawRms > 0.004 && this.breathK > this.BREATH_FLAT){ pitch = -1; this.lastF0T = -1e9; }
+      // 휘파람 거부: 모델은 7모음+무음뿐이라 순음에도 확신 있는 모음을 낸다. breathiness()(평탄도)는
+      // 순음이 모음보다 더 또렷한 배음이라 반대 방향으로 나와 못 잡고, 피치도 못 잡는다(관측 427Hz는
+      // 여성 고음과 겹침). 저역(80~900Hz) 에너지 비율만이 둘을 가른다 — lowBandRatio() 참조.
+      this.toneK += (this.lowBandRatio() - this.toneK)*0.5;
+      if(this.rawRms > 0.004 && this.toneK < this.TONE_LOW_MIN){ pitch = -1; this.lastF0T = -1e9; }
+      // ⚠️ 임시 진단 로그 — 0.25 는 추측값. toneK 가 느슨한 기준(0.45) 아래로 내려갈 때 150ms 간격으로
+      // 찍어 실제 휘파람/목소리 값을 모은 뒤 실측치로 교체할 것. 전시 끝나면 지울 것.
+      if(this.toneK < 0.45 && this.rawRms > 0.004 && now - (this._lastToneLogT||0) > 150){
+        this._lastToneLogT = now;
+        console.log('[tone]', { toneK:+this.toneK.toFixed(3), rawRms:+this.rawRms.toFixed(4) });
+      }
       }
       if(this.calibEnd){
         this.calibMax = Math.max(this.calibMax, level);
@@ -800,8 +829,16 @@ export default class SoriJit extends React.Component {
           c.gapLatch = true;
           split = vowel;   // 인식 안 되는 동안은 새 덩이를 만들지 않음 (모음 붙는 프레임에 나눔)
         } else if(vowel && last.v && vowel !== last.v){
-          if(vowel === c.pendV) c.pendN = (c.pendN||0)+1; else { c.pendV = vowel; c.pendN = 1; }
-          if(c.pendN >= this.PEND_N) split = vowel;
+          // 비브라토는 아↔어 같은 혼동쌍 라벨을 흔들어 놓는다 — 모델 한계이지 화자가 모음을 바꾼
+          // 게 아니다. 떨림 중엔 전환 증거를 쌓지 않고 지운다. 건너뛰기만 하면 차오른 카운터가
+          // 그대로 얼어붙어, 떨림이 잠깐 내려가는 순간 바로 분절돼 버린다.
+          // ① 재타격이 쓰는 _ampTrem 은 세기 떨림만 보지만 비브라토는 음높이 쪽이 주이므로,
+          // 여기선 음높이·세기를 모두 포함한 smoothTrem 을 쓴다.
+          if(this.smoothTrem >= this.AMP_TREM_NOSPLIT){ c.pendV = null; c.pendN = 0; }
+          else {
+            if(vowel === c.pendV) c.pendN = (c.pendN||0)+1; else { c.pendV = vowel; c.pendN = 1; }
+            if(c.pendN >= this.PEND_N) split = vowel;
+          }
         }
 
         if(split){

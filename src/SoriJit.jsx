@@ -425,7 +425,10 @@ export default class SoriJit extends React.Component {
   AMP_TREM_FLAT_DB = 0.3;
   AMP_TREM_TONALITY_MIN = 0.5;   // 세기는 느린 크레셴도·재타격(0.6Hz 등)이 새어 들어오므로 집중도 하한을 더 높게     // 세기 흔들림이 이보다 작으면 평탄으로 보고 0
   AMP_TREM_SKIP_MS = 250;     // 소리 시작 직후의 상승 구간은 떨림으로 오인하므로 기록하지 않는다
+  AMP_TREM_NOSPLIT = 0.35;    // 세기 떨림이 이 이상이면 비브라토로 보고 RELEASE_RATIO 골을 재타격으로 세지 않는다
+                              // (낮추면 비브라토가 여전히 쪼개질 때, 올리면 진짜 재타격이 안 걸릴 때 조정)
   ampHist = []; _ampT0 = 0;
+  _ampTrem = {v:0, hz:0}; _ampTremT = 0;   // computeAmpTremor 캐시 — 매 프레임 재계산하지 않고 100ms 간격으로만 갱신
   TREM_TONALITY_MIN = 0.45;   // 집중도 하한 (올리면 '진짜 떨림'만) — 억양 흔들림의 배음이 잔떨림으로 새지 않게
   // 억양 흔들림(느린 떨림): 음을 규칙적으로 오르내리는 것. 1초에 한 번 안팎이라 창을 길게 본다.
   TREM_SLOW_WIN_MS = 3000;    // 0.7Hz 도 2주기 넘게 들어가는 창
@@ -763,6 +766,9 @@ export default class SoriJit extends React.Component {
       // 잔떨림 = 음높이·세기 잔떨림 중 큰 쪽, 억양 흔들림은 음높이로만. 떨림 = 둘 중 큰 쪽
       const ts = this.computeSlowTremor();
       const tfP = this.computeTremor(now, ts.v > 0 ? ts : null), tfA = this.computeAmpTremor();
+      // 재타격/비브라토 판정용 캐시 — tfA 는 이미 위에서 매 프레임 계산되므로 호출을 늘리지 않고
+      // 갱신 빈도만 100ms 로 눌러서 쓴다(분절 판정이 매 프레임 바뀔 필요는 없다)
+      if(now - this._ampTremT > 100){ this._ampTremT = now; this._ampTrem = tfA; }
       const tf = tfP.v >= tfA.v ? tfP : tfA;
       trem = Math.max(tf.v, ts.v);
       this.tremF += (tf.v - this.tremF)*0.15; if(tf.v > 0) this.tremFHz += (tf.hz - this.tremFHz)*0.1;
@@ -824,7 +830,8 @@ export default class SoriJit extends React.Component {
         s.lvl += (this.smoothSize - s.lvl) * (this.smoothSize > s.lvl ? this.LVL_ATTACK : this.LVL_RELEASE);
         // 발성 중 깊은 골도 갭으로 친다 — 재타격 분절의 방아쇠
         if(this.smoothSize < s.peak*this.RELEASE_RATIO){
-          c.gapMs = (c.gapMs||0) + dt;
+          // 비브라토(규칙적 세기 흔들림)로 인한 골은 재타격 갭으로 세지 않는다 — AMP_TREM_NOSPLIT
+          if(this._ampTrem.v < this.AMP_TREM_NOSPLIT) c.gapMs = (c.gapMs||0) + dt;
         } else {
           if(!split && !c.gapLatch) c.gapMs = 0;   // 정상 세기 = 갭 리셋 (걸어둔 갭은 유지)
           if(pitch>0){ s.pitch += (pitch - s.pitch)*0.15; c.avgPitch += (pitch-c.avgPitch)*0.05; }

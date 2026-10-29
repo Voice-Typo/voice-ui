@@ -1,7 +1,7 @@
 import React from 'react';
 import './sorijit.css';
 
-// ── Python 인식 서버(remark_ws_server2.py) 연결 설정 ──────────────────
+// ── Python 인식 서버(voice-recognition 저장소 recognizer/ws_server.py) 연결 설정 ──
 // ws://localhost:8765 로 프레임 판정 {vowel, vowel_raw, margin, f0, rms} 수신.
 // 신선한 WS 프레임이 있으면 모음/피치를 Python 모델 값으로 덮어쓰고,
 // 끊기거나 오래되면(STALE) 브라우저 포먼트 분석으로 자동 복귀한다.
@@ -285,7 +285,7 @@ export default class SoriJit extends React.Component {
     return {level, pitch, vowel: seg.v};
   }
 
-  // ── Python 인식 서버(remark_ws_server2.py) WebSocket 소스 ─────────────
+  // ── Python 인식 서버(recognizer/ws_server.py) WebSocket 소스 ─────────────
   // ws://localhost:8765 에서 {vowel, vowel_raw, margin, f0, rms} 를 받는다.
   // vowel 은 '아'..'어' | '?' | null. '?'·null 은 '인식 안 됨' → null.
   // 음성 분석·물리·충돌·수명·글자 회전은 건드리지 않는다(절대규칙). loop 는
@@ -1166,11 +1166,18 @@ bgRGB(t, P){
     b.spinK = 1; b.floatT = now;
     b.life = Math.min(20000, 6500 + b.durSec*1900 + Math.random()*3200);
     // 첫 벽 충돌 높이 = 음높이: 높으면 위쪽, 낮으면 아래쪽(경계선 근처)
-    const pt = Math.max(0, Math.min(1, (b.avgPitch - this.state.basePitch + 150)/300));
+    // 색·회전과 같은 축(pitchTone, pitchCenter 기준 반음 척도)으로 통일 — 전엔 Hz 선형
+    // basePitch±150 창이라 저음 화자는 색은 맞아도 뜨는 높이가 항상 바닥 근처에 묶였고
+    // 기준보다 150Hz 넘게 못 올리면 끝까지 위로 못 떴음. pitchSpin() 과 같은 변환.
+    // 기준이 아직 안 굳은 워밍업 중엔 pitchTone()이 0을 내 중앙 높이로 뜬다 — 그때 색도
+    // 중립(연두)이므로 서로 어긋나지 않는다.
+    const pt = (this.pitchTone(b.avgPitch) + 1)/2; // 0..1, 색·회전과 같은 축
     b.riseTo = (gy-80)*(1-pt) + H*0.08*pt + (Math.random()-.5)*30;
     b.wallDir = Math.random() < 0.5 ? -1 : 1; // 좌우 랜덤 — 항상 오른쪽으로만 쏠리던 것 수정
     b.vx = b.wallDir*(0.9+Math.random()*0.9); // 생성 각도 그대로 기울어 올라가며 바로 사이드로
-    b.drift = Math.max(-.35, Math.min(.35, (b.avgPitch-this.state.basePitch)/150*.35));
+    // drift 도 같은 축: pitchTone 은 이미 -1..+1 로 clamp 돼 있어 범위·부호가 기존과 동일
+    // (기준보다 높으면 +, 낮으면 −).
+    b.drift = this.pitchTone(b.avgPitch)*.35;
     this.anchorBorn = now; // 기본 원형 버블이 중앙 하단에 새로 등장
     this.bubbles.push(b);
     if(this.bubbles.length>24){ const old=this.bubbles.shift(); }
@@ -2715,10 +2722,8 @@ bgRGB(t, P){
       basePitch: s.basePitch, basePitchLabel: s.basePitch+' Hz',
       endHold: s.endHold, endHoldLabel: (s.endHold/1000).toFixed(2)+' s',
       sizeMul: s.sizeMul, sizeMulLabel: '×'+s.sizeMul.toFixed(1),
-      vowelTol: s.vowelTol, vowelTolLabel: s.vowelTol<=0.45?'엄격':s.vowelTol>=0.85?'관대':'보통',
       setEndHold: e=>this.setState({endHold:+e.target.value}),
       setSizeMul: e=>this.setState({sizeMul:+e.target.value}),
-      setVowelTol: e=>this.setState({vowelTol:+e.target.value}),
       presetMale: ()=>{ this.pitchAvg = 130; this.setState({basePitch:130}); },
       presetFemale: ()=>{ this.pitchAvg = 210; this.setState({basePitch:210}); },
       presetChild: ()=>{ this.pitchAvg = 260; this.setState({basePitch:260}); },
@@ -2726,16 +2731,6 @@ bgRGB(t, P){
       setThresh: e=>this.setState({thresh:+e.target.value}),
       setBasePitch: e=>{ this.pitchAvg = +e.target.value; this.setState({basePitch:+e.target.value}); },
       calibrateNoise: this.calibrateNoise,
-      bgDepth: s.bgDepth,
-      bgDepthLabel: Math.round(s.bgDepth*100)+'%',
-      setBgDepth: e=>this.setState({bgDepth:+e.target.value}),
-      bgShift: s.bgShift,
-      bgShiftLabel: s.bgShift < 0.03 ? '같은 색' : Math.round(s.bgShift*100)+'%',
-      setBgShift: e=>this.setState({bgShift:+e.target.value}),
-      bgSoft: s.bgMode==='soft', bgVivid: s.bgMode==='vivid', bgOff: s.bgMode==='off',
-      setBgSoft: ()=>this.setState({bgMode:'soft'}),
-      setBgVivid: ()=>this.setState({bgMode:'vivid'}),
-      setBgOff: ()=>this.setState({bgMode:'off'}),
       calBtnLabel: s.calibrating ? '주변 소음 측정 중…' : '주변 소음 자동 측정',
       recogRefF0Label: s.recogRefF0 ? `서버 기준 피치 ${Math.round(s.recogRefF0)} Hz` : '',
       srWarnMsg: s.srWarn,
@@ -2835,7 +2830,7 @@ bgRGB(t, P){
                         </button>
                       </div>
                       <span style={{fontSize:"11.5px",color:"var(--color-neutral-500)",lineHeight:"1.5"}}>
-                        Python 모델은 remark_ws_server2.py 실행이 필요합니다 (ws://localhost:8765). 연결 전이거나 끊기면 자동으로 포먼트 분석으로 대체됩니다.
+                        Python 모델은 voice-recognition 저장소의 recognizer/ws_server.py 실행이 필요합니다. 주소는 ?ws= 쿼리(없으면 VITE_RECOG_WS_URL, 그마저 없으면 https에서는 wss://현재 호스트)로 정해집니다. 연결 전이거나 끊기면 자동으로 포먼트 분석으로 대체됩니다.
                       </span>
                       {v.srWarnMsg ? (
                         <span style={{fontSize:"11.5px",color:"var(--color-accent-2-700)",lineHeight:"1.5"}}>
@@ -2985,87 +2980,8 @@ bgRGB(t, P){
                         </>
                       ) : null}
                     </div>
-                    <label style={{display:"flex",flexDirection:"column",gap:"6px"}}>
-                      <span style={{display:"flex",justifyContent:"space-between"}}>
-                        <span style={{color:"var(--color-neutral-600)",fontWeight:"500"}}>
-                          배경 진하기
-                        </span>
-                        <span style={{fontVariantNumeric:"tabular-nums"}}>
-                          {v.bgDepthLabel}
-                        </span>
-                      </span>
-                      <input type="range" min="0" max="1" step="0.01" value={v.bgDepth} onChange={v.setBgDepth} />
-                    </label>
-                    <label style={{display:"flex",flexDirection:"column",gap:"6px"}}>
-                      <span style={{display:"flex",justifyContent:"space-between"}}>
-                        <span style={{color:"var(--color-neutral-600)",fontWeight:"500"}}>
-                          배경–버블 대비
-                        </span>
-                        <span style={{fontVariantNumeric:"tabular-nums"}}>
-                          {v.bgShiftLabel}
-                        </span>
-                      </span>
-                      <input type="range" min="0" max="1" step="0.01" value={v.bgShift} onChange={v.setBgShift} />
-                    </label>
-                    <div style={{display:"flex",flexDirection:"column",gap:"6px"}}>
-                      <span style={{color:"var(--color-neutral-600)",fontWeight:"500"}}>
-                        배경 색 (음정 반응)
-                      </span>
-                      <div style={{display:"flex",gap:"6px"}}>
-                        {v.bgSoft ? (
-                          <>
-                            <button className="btn btn-primary" style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              은은
-                            </button>
-                            <button className="btn btn-secondary" onClick={v.setBgVivid} style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              뚜렷
-                            </button>
-                            <button className="btn btn-secondary" onClick={v.setBgOff} style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              끔
-                            </button>
-                          </>
-                        ) : null}
-                        {v.bgVivid ? (
-                          <>
-                            <button className="btn btn-secondary" onClick={v.setBgSoft} style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              은은
-                            </button>
-                            <button className="btn btn-primary" style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              뚜렷
-                            </button>
-                            <button className="btn btn-secondary" onClick={v.setBgOff} style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              끔
-                            </button>
-                          </>
-                        ) : null}
-                        {v.bgOff ? (
-                          <>
-                            <button className="btn btn-secondary" onClick={v.setBgSoft} style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              은은
-                            </button>
-                            <button className="btn btn-secondary" onClick={v.setBgVivid} style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              뚜렷
-                            </button>
-                            <button className="btn btn-primary" style={{flex:"1",padding:"6px 0",fontSize:"12.5px"}}>
-                              끔
-                            </button>
-                          </>
-                        ) : null}
-                      </div>
-                    </div>
-                    <label style={{display:"flex",flexDirection:"column",gap:"6px"}}>
-                      <span style={{display:"flex",justifyContent:"space-between"}}>
-                        <span style={{color:"var(--color-neutral-600)",fontWeight:"500"}}>
-                          모음 인식 민감도
-                        </span>
-                        <span style={{fontVariantNumeric:"tabular-nums"}}>
-                          {v.vowelTolLabel}
-                        </span>
-                      </span>
-                      <input type="range" min="0.3" max="1.2" step="0.05" value={v.vowelTol} onChange={v.setVowelTol} />
-                    </label>
                     <p style={{margin:"0",fontSize:"11.5px",lineHeight:"1.5",color:"var(--color-neutral-500)"}}>
-                      주변이 조용한 상태에서 소음 측정을 누르면 임계값이 자동 조정됩니다. 음정은 도는 속도로 나타납니다 — 높은 음일수록 빨리, 낮은 음일수록 천천히. 색은 가시광선 파장을 그대로 씁니다 — 기준음보다 낮으면 파랑·보라(400nm) 쪽, 기준음이면 연두(540nm), 높으면 주황·빨강(680nm) 쪽. 화면에는 한 순간에 한 파장만 나타납니다. 배경은 방울과 언제나 같은 파장을 쓰되 '배경–버블 대비'만큼 더 옅게 흐릅니다 — 톤은 어긋날 수 없고, 지금 만들어지는 방울만 앞으로 나옵니다. 대비를 0으로 두면 배경과 방울이 같은 색이 됩니다. 기준음은 발성이 쌓이면 화자의 음역 중심으로 천천히 옮겨 가므로, 목소리가 높든 낮든 스펙트럼 양쪽을 다 쓰게 됩니다. 떠오른 방울은 발화 당시의 색을 테두리에 지닌 채, 회전이 점점 느려지다 멎는 순간 터집니다. 떨림이 클수록 울렁임의 폭이 넓어집니다. 인식 민감도를 관대하게 두면 인식불가가 줄어듭니다.
+                      주변이 조용한 상태에서 소음 측정을 누르면 임계값이 자동 조정됩니다. 음정은 도는 속도로 나타납니다 — 높은 음일수록 빨리, 낮은 음일수록 천천히. 색은 가시광선 파장을 그대로 씁니다 — 기준음보다 낮으면 파랑·보라(400nm) 쪽, 기준음이면 연두(540nm), 높으면 주황·빨강(680nm) 쪽. 화면에는 한 순간에 한 파장만 나타납니다. 기준음은 발성이 쌓이면 화자의 음역 중심으로 천천히 옮겨 가므로, 목소리가 높든 낮든 스펙트럼 양쪽을 다 쓰게 됩니다. 떠오른 방울은 발화 당시의 색을 테두리에 지닌 채, 회전이 점점 느려지다 멎는 순간 터집니다. 떨림이 클수록 울렁임의 폭이 넓어집니다. 뜨는 높이도 색·회전과 같은 기준을 쓰므로, 기준음보다 높게 내면 위로, 낮게 내면 아래로 뜹니다.
                     </p>
                   </div>
                 </div>

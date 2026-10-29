@@ -562,7 +562,13 @@ export default class SoriJit extends React.Component {
 
   // ── dB 크기 매핑 (voicetypo_ui 에서 이식) : 선형 rms 는 웬만한 발성이 다 최대로 클립됐다 ──
   SIZE_DB_LO = -50; SIZE_DB_HI = -18; SIZE_DB_HEAD = 12;   // dB 구간 (속삭임~또렷~절대최대)
-  SIZE_R_MIN = 10; SIZE_R_NOM = 70; SIZE_FILL = 0.18; SIZE_GAMMA = 1.0;
+  // 크기 기준을 모두 화면 짧은 변(vpMin) 비율로 잡는다.
+  // 예전에는 R_MIN/R_NOM 만 절대 픽셀이고 SIZE_FILL 만 비율이라, 작은 화면에서 방울이
+  // 화면을 훨씬 많이 덮었다 — 지름 140px 가 1080 화면에서는 13%, 700 화면에서는 20%.
+  // 아래 비율은 vpMin 1080 에서 기존 10px/70px 와 같아지도록 맞춘 값이다.
+  SIZE_R_MIN_F = 0.0093;  // 가장 작은 방울 (1080 → 10px)
+  SIZE_R_NOM_F = 0.065;   // 보통 목소리 방울 (1080 → 70px). 전체적으로 크면 이 값을 낮출 것
+  SIZE_FILL = 0.18; SIZE_GAMMA = 1.0;
   // SIZE_FILL: 헤드룸(-18dBFS 초과) 구간에서 방울이 커질 수 있는 상한을 화면 짧은 변 대비 비율로 정한다.
   // 0.44 였을 때 1080 화면에서 반지름 475px(지름 950px)까지 커져 여러 개가 뜨면 화면이 막혔다.
   // 0.18 이면 1080 화면에서 반지름 194px. 더 줄이려면 이 값만 낮추면 된다(0.12~0.22 사이).
@@ -575,7 +581,7 @@ export default class SoriJit extends React.Component {
   // 목소리가 큰 사람이 평소 톤으로만 말해도 항상 헤드룸(거의 최대 크기)에 들어가 버렸다.
   // 기준이 자리잡을 때까지는 워밍업 중립값을 쓴다 (PITCH_REF_MS, 아래 pitchTone 과 동일한 게이트).
   loudNorm(rms){
-    if((this._voicedMs||0) < this.PITCH_REF_MS) return 1.0; // 기준 미확정: 누구나 '또렷'(SIZE_R_NOM) 크기로 통일
+    if((this._voicedMs||0) < this.PITCH_REF_MS) return 1.0; // 기준 미확정: 누구나 '또렷'(SIZE_R_NOM_F) 크기로 통일
     const L = 20*Math.log10(Math.max(rms, 1e-7));
     const hi = (this.lvlRef != null) ? this.lvlRef : this.SIZE_DB_HI; // 화자 기준이 '또렷' 지점을 대신한다
     const lo = hi - (this.SIZE_DB_HI - this.SIZE_DB_LO);               // 기준 아래 32dB 폭은 그대로 유지
@@ -586,11 +592,12 @@ export default class SoriJit extends React.Component {
   // 정규화 세기 → 반지름(px)
   segRadius(lvl){
     const nom = Math.max(0, Math.min(1, lvl));
-    let r = this.SIZE_R_MIN + (this.SIZE_R_NOM - this.SIZE_R_MIN) * Math.pow(nom, this.SIZE_GAMMA);
+    const rMin = this.vpMin * this.SIZE_R_MIN_F, rNom = this.vpMin * this.SIZE_R_NOM_F;
+    let r = rMin + (rNom - rMin) * Math.pow(nom, this.SIZE_GAMMA);
     if(lvl > 1){
       const u = Math.min(1, lvl - 1);
-      const rMax = Math.max(this.SIZE_R_NOM, this.vpMin * this.SIZE_FILL);
-      r += (rMax - this.SIZE_R_NOM) * u * u;
+      const rMax = Math.max(rNom, this.vpMin * this.SIZE_FILL);
+      r += (rMax - rNom) * u * u;
     }
     return r * this.state.sizeMul;
   }

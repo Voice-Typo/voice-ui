@@ -634,7 +634,10 @@ export default class SoriJit extends React.Component {
     return den > 0 ? num/den : 0;
   }
 
-  TONE_LOW_MIN = 0.25;   // 저역 에너지 비율이 이보다 작으면 휘파람 등 목소리 아닌 순음으로 본다
+  TONE_LOW_MIN = 0.15;   // 저역 에너지 비율이 이보다 작으면 휘파람 등 목소리 아닌 순음으로 본다
+  // 실측(작가 마이크): 휘파람 0.014~0.058, 아 발성 0.311~0.45+ (0.45 아래만 기록되므로 발성은 꼬리만 보인 값).
+  // 두 값의 기하평균이 0.134 라 0.15 로 잡았다. 0.25 는 발성 최저값에 1.24배로 붙어 있어 위험했다 —
+  // 휘파람을 한 번 놓치는 것보다 멀쩡한 목소리를 거부하는 쪽이 훨씬 나쁘다.
   toneK = 1;
 
   // 모음은 '이'까지도 f0 배음이 저역(80~900Hz)에 두껍게 깔리지만, 휘파람 같은 순음은 1~2.5kHz
@@ -824,24 +827,20 @@ export default class SoriJit extends React.Component {
         // ── 분절 판정 ──
         //  ① 재타격: 세기가 세그 피크의 RELEASE_RATIO 아래로 DIP_MS 이상 꺼졌다 돌아옴 → 같은 모음도 새 덩이
         //  ② 모음 전환: PEND_N 프레임 연속 다른 모음이어야 인정 (한 프레임 튐 무시)
-        let split = null;
+        let split = null, splitWhy = null;
         if(gapped){
           c.gapLatch = true;
-          split = vowel;   // 인식 안 되는 동안은 새 덩이를 만들지 않음 (모음 붙는 프레임에 나눔)
+          split = vowel; splitWhy = 'gap';   // 인식 안 되는 동안은 새 덩이를 만들지 않음 (모음 붙는 프레임에 나눔)
         } else if(vowel && last.v && vowel !== last.v){
-          // 비브라토는 아↔어 같은 혼동쌍 라벨을 흔들어 놓는다 — 모델 한계이지 화자가 모음을 바꾼
-          // 게 아니다. 떨림 중엔 전환 증거를 쌓지 않고 지운다. 건너뛰기만 하면 차오른 카운터가
-          // 그대로 얼어붙어, 떨림이 잠깐 내려가는 순간 바로 분절돼 버린다.
-          // ① 재타격이 쓰는 _ampTrem 은 세기 떨림만 보지만 비브라토는 음높이 쪽이 주이므로,
-          // 여기선 음높이·세기를 모두 포함한 smoothTrem 을 쓴다.
-          if(this.smoothTrem >= this.AMP_TREM_NOSPLIT){ c.pendV = null; c.pendN = 0; }
-          else {
-            if(vowel === c.pendV) c.pendN = (c.pendN||0)+1; else { c.pendV = vowel; c.pendN = 1; }
-            if(c.pendN >= this.PEND_N) split = vowel;
-          }
+          if(vowel === c.pendV) c.pendN = (c.pendN||0)+1; else { c.pendV = vowel; c.pendN = 1; }
+          if(c.pendN >= this.PEND_N){ split = vowel; splitWhy = 'vowel'; }
         }
 
         if(split){
+          // ⚠️ 임시 진단 로그 — 떨면서 시작한 발성이 어느 경로로 쪼개지는지 확인용.
+          // gap = 세기 출렁임(재타격), vowel = 모음 라벨 전환. ampTrem 은 ① 가드가 켜졌는지,
+          // tMs 는 발성 시작 후 경과 시간(떨림 탐지는 창이 차는 800ms 전엔 0 이다). 전시 후 지울 것.
+          console.log('[split]', {why:splitWhy, tMs:Math.round(now-c.t0), trem:+(this.smoothTrem||0).toFixed(2), ampTrem:+((this._ampTrem && this._ampTrem.v)||0).toFixed(2), from:last.v, to:split});
           last.tEnd = now;
           c.segs.push(this.mkSeg(split, now, last));
           c.gapMs = 0; c.gapLatch = false; c.pendV = null; c.pendN = 0;

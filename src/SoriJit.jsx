@@ -711,8 +711,12 @@ export default class SoriJit extends React.Component {
       // 휘파람 거부: 모델은 7모음+무음뿐이라 순음에도 확신 있는 모음을 낸다. breathiness()(평탄도)는
       // 순음이 모음보다 더 또렷한 배음이라 반대 방향으로 나와 못 잡고, 피치도 못 잡는다(관측 427Hz는
       // 여성 고음과 겹침). 저역(80~900Hz) 에너지 비율만이 둘을 가른다 — lowBandRatio() 참조.
+      // ⚠️ 2026-10-30 전시 중 긴급 철회. 크게 지르면 클리핑으로 고역이 퍼져 toneK 가 0.087 까지
+      // 떨어진다(실측). 휘파람 0.014~0.058 과 겹쳐 가를 수가 없다. 거부가 걸리면 lastF0T=-1e9 로
+      // 발성이 250ms 통째로 끊겨 ① 모음이 안 잡히고 ② 피치 없는 큰 소리 = 바람 판정으로 방울이
+      // 터진다. 휘파람이 모음으로 잡히는 건 거슬리는 정도지만 이건 체험이 불가능해진다.
+      // toneK 계산과 로그는 남겨 둔다 — 전시 후 rawRms 조건과 함께 다시 설계할 것.
       this.toneK += (this.lowBandRatio() - this.toneK)*0.5;
-      if(this.rawRms > 0.004 && this.toneK < this.TONE_LOW_MIN){ pitch = -1; this.lastF0T = -1e9; }
       // ⚠️ 임시 진단 로그 — 0.25 는 추측값. toneK 가 느슨한 기준(0.45) 아래로 내려갈 때 150ms 간격으로
       // 찍어 실제 휘파람/목소리 값을 모은 뒤 실측치로 교체할 것. 전시 끝나면 지울 것.
       if(this.toneK < 0.45 && this.rawRms > 0.004 && now - (this._lastToneLogT||0) > 150){
@@ -738,7 +742,11 @@ export default class SoriJit extends React.Component {
       // ── 바람(후~) 감지: 피치 없는 큰 소리가 BLOW_HOLD_MS 이상 이어지면 입김으로 본다 ──
       // 박수·타자는 짧아서 지속 조건에 걸러진다. 세기만큼 바람이 세지고(windK 0~1),
       // 방울은 drawSceneSource 에서 막대 고리 반대쪽으로 날려 화면 밖에서 사라진다.
-      const breathy = !this.demo && !this.state.calibrating && pitch <= 0 && level > this.state.thresh*this.BLOW_GAIN;
+      // 바람은 '피치의 부재'가 아니라 '숨소리의 존재'로 판정해야 한다. 피치가 없는 큰 소리는
+      // 전부 바람이 됐는데, 크게 지르면 level 은 1 에 붙고(문턱 0.09) 피치는 클리핑으로 쉽게
+      // 끊겨 발성이 바람으로 잡혔다. 실측: 진짜 입김 breathK 0.522~0.608 / 오작동 0.002~0.005
+      // — 100배 차이라 BREATH_FLAT(0.25) 으로 양쪽 다 넉넉히 갈린다.
+      const breathy = !this.demo && !this.state.calibrating && pitch <= 0 && level > this.state.thresh*this.BLOW_GAIN && this.breathK > this.BREATH_FLAT;
       if(breathy){ if(!this._blowT0) this._blowT0 = now; } else this._blowT0 = 0;
       const blowing = breathy && now - this._blowT0 > this.BLOW_HOLD_MS;
       const windT = blowing ? Math.min(1, 0.45 + this.loudNorm(this.rawRms)*0.6) : 0;

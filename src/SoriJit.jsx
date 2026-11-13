@@ -342,6 +342,7 @@ export default class SoriJit extends React.Component {
     // 새 관람객의 세션 시작점 — 이전 사람의 피치·세기 기준이 남아있지 않도록 여기서 초기화한다.
     // (새로고침으로도 리셋되지만, 리로드 없이 마이크를 다시 켜는 경로가 생기더라도 안전하게.)
     this.pitchAvg = undefined; this.lvlRef = undefined; this._voicedMs = 0;
+    this._refF0 = []; this._refLvl = [];   // 워밍업 표본도 같이 비운다 — 안 비우면 앞사람 기준이 섞인다
     try{
       this.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:1}});
       // RE:MARK 수집기(recorder.ts)와 동일한 검증 — 요청만으로는 부족하고 실제로 꺼졌는지 getSettings() 로 확인한다.
@@ -764,16 +765,28 @@ export default class SoriJit extends React.Component {
       // 기준음(색·회전의 0점)을 화자의 실제 음역 중심으로 천천히 옮긴다.
       // 발성 중에만 움직이고 τ≈8초라, 한 번의 발화 안에서는 사실상 고정이다.
       if(pitch>0 && level > this.state.thresh){
-        if(!(this.pitchAvg>0)) this.pitchAvg = pitch;
-        else this.pitchAvg += (pitch - this.pitchAvg)*Math.min(1, dt/1000*this.BASE_ADAPT);
-        this.pitchAvg = Math.max(70, Math.min(400, this.pitchAvg));
-        // 세기 기준(dB)도 같은 조건·같은 속도로 화자 고유값에 수렴시킨다 — 피치와 동일 패턴.
-        // demo 는 실제 dB(rawRms) 가 없어(합성 level 뿐) 생략.
-        if(!this.demo){
-          const lvlNow = 20*Math.log10(Math.max(this.rawRms, 1e-7));
-          if(this.lvlRef == null) this.lvlRef = lvlNow;
-          else this.lvlRef += (lvlNow - this.lvlRef)*Math.min(1, dt/1000*this.LVL_ADAPT);
-          this.lvlRef = Math.max(-60, Math.min(-6, this.lvlRef));
+        const lvlNow = this.demo ? null : 20*Math.log10(Math.max(this.rawRms, 1e-7));
+        // 워밍업(PITCH_REF_MS) 동안에는 기준을 확정하지 않고 표본만 모았다가 중앙값으로 정한다.
+        // 첫 유성 프레임 하나를 그대로 기준으로 쓰면 안 된다 — 발성 시작 구간은 아직 주기가
+        // 서지 않아 자기상관이 하위 조화에 락온하기 쉽다. 지속 모음 녹음 224개로 재면 첫 유성
+        // 프레임은 그 발성의 중앙값에서 평균 12.0반음(89%가 ±3반음 초과) 벗어났고, 같은 구간의
+        // 중앙값을 쓰면 0.20반음(±3반음 초과 0.9%)으로 줄었다. 매핑 폭이 ±3반음(PITCH_SPAN)이라
+        // 전자는 색이 세션 내내 한쪽 끝에 붙는다는 뜻이다(τ≈8초라 체험 중에 못 돌아온다).
+        // 화면은 어차피 이 구간에서 중립이므로(pitchTone/loudNorm 의 워밍업 게이트) 보이는 타이밍은 그대로다.
+        if((this._voicedMs||0) < this.PITCH_REF_MS){
+          (this._refF0 || (this._refF0 = [])).push(pitch);
+          if(lvlNow != null) (this._refLvl || (this._refLvl = [])).push(lvlNow);
+        } else {
+          if(!(this.pitchAvg>0)) this.pitchAvg = this.median(this._refF0, pitch);
+          else this.pitchAvg += (pitch - this.pitchAvg)*Math.min(1, dt/1000*this.BASE_ADAPT);
+          this.pitchAvg = Math.max(70, Math.min(400, this.pitchAvg));
+          // 세기 기준(dB)도 같은 조건·같은 속도로 화자 고유값에 수렴시킨다 — 피치와 동일 패턴.
+          // demo 는 실제 dB(rawRms) 가 없어(합성 level 뿐) 생략.
+          if(lvlNow != null){
+            if(this.lvlRef == null) this.lvlRef = this.median(this._refLvl, lvlNow);
+            else this.lvlRef += (lvlNow - this.lvlRef)*Math.min(1, dt/1000*this.LVL_ADAPT);
+            this.lvlRef = Math.max(-60, Math.min(-6, this.lvlRef));
+          }
         }
         // 기준(피치·세기)이 자리잡았다고 볼 만한 '누적 발성 시간' — 워밍업 게이트(색·크기)가 이걸로 푼다.
         // demo 에서도 이 분기를 타므로(위 if 공유) 데모 색상이 영원히 중립에 묶이지 않는다.
@@ -960,6 +973,12 @@ export default class SoriJit extends React.Component {
   // 안 잡힌 채로 요동치는 것을 막는다.
   PITCH_REF_MS = 1200;
   pitchCenter(){ return this.pitchAvg > 0 ? this.pitchAvg : (this.state.basePitch || 190); }
+  // 워밍업 표본의 중앙값. 표본이 비어 있으면(워밍업을 건너뛴 경로) 현재 값으로 떨어진다.
+  median(arr, fallback){
+    if(!arr || !arr.length) return fallback;
+    const a = arr.slice().sort((x,y)=>x-y), n = a.length;
+    return n%2 ? a[(n-1)>>1] : (a[n/2-1]+a[n/2])/2;
+  }
   pitchTone(p){
     const base = this.pitchCenter();
     if(!(p > 0) || !(base > 0)) return 0;

@@ -25,6 +25,20 @@ function resolveRecogWsUrl() {
 }
 
 const RECOG_WS_URL = resolveRecogWsUrl();
+
+// 표시 단계 신뢰도 게이트 — 기본 꺼짐(지금까지의 동작과 동일).
+//   ?gate=1      → 서버의 gated 플래그를 그대로 쓴다(서버 임계 0.90)
+//   ?gate=0.95   → UI 가 stable_conf 를 그 값과 직접 비교한다(재배포 없이 운용점 조절)
+// 서버는 stable_conf/gated 를 늘 보내왔지만 UI 가 읽지 않아, 설계상의 '미인식' 경로가
+// 표시 단계에 연결돼 있지 않았다. 7모음 밖 발성에서 이 게이트가 실제로 걸리는지는
+// 아직 측정된 바 없음(게이팅 곡선은 고립 지속 모음으로만 그렸다).
+function resolveConfGate() {
+  const v = new URLSearchParams(location.search).get('gate');
+  if (v == null || v === '' || v === '0') return null;
+  const n = parseFloat(v);
+  return (Number.isFinite(n) && n > 0 && n < 1) ? n : true;   // true = 서버 판정 사용
+}
+const CONF_GATE = resolveConfGate();
 const RECOG_STALE_MS = 300;
 
 // 원본 x-dc 컴포넌트의 props 기본값
@@ -64,6 +78,7 @@ export default class SoriJit extends React.Component {
   VOWELS = [['아',800,1250],['에',530,1950],['이',300,2350],['오',450,820],['우',350,700],['으',380,1400],['어',620,1000]];
 
   componentDidMount(){
+    if(CONF_GATE) console.log('[gate] 표시 단계 신뢰도 게이트 ON:', CONF_GATE === true ? '서버 판정(0.90)' : CONF_GATE);
     const cv = this.canvasRef.current;
     this.ctx = cv.getContext('2d');
     this.onResize = ()=>{ cv.width = cv.clientWidth*devicePixelRatio; cv.height = cv.clientHeight*devicePixelRatio;
@@ -316,6 +331,8 @@ export default class SoriJit extends React.Component {
         // 이 필드를 "안 쓰고 있네" 하고 되살려 다시 연결하지 말 것.
         rms:(d.rms == null ? null : +d.rms),
         margin:(d.margin == null ? 0 : +d.margin),
+        gated:!!d.gated,
+        conf:(d.stable_conf == null ? null : +d.stable_conf),
         t:performance.now() };
     };
     ws.onerror = ()=>{};               // 정리는 onclose 에서
@@ -335,6 +352,16 @@ export default class SoriJit extends React.Component {
     const ws = this.ws; this.ws = null; this.wsFrame = null;
     if(ws){ ws.onclose = null; ws.onmessage = null; try{ ws.close(); }catch(_){} }
     this.setState({recogStatus:'off'});
+  }
+  // CONF_GATE 가 켜져 있으면 확신이 낮은 프레임을 '미인식'(null)으로 돌린다 — 틀린 모음을
+  // 확신하며 띄우는 것이 모르겠다고 표시하는 것보다 나쁘다는 이 프로젝트의 목적함수.
+  // 일시적인 게이트는 글자를 바꾸지 않는다(noRecMs 는 인식 프레임 하나에 0 으로 리셋되고
+  // last.v 가 남는다). 1.8초(UNREC_MS) 연속으로 확신이 없을 때만 회오리/터짐으로 간다.
+  wsVowel(){
+    const f = this.wsFrame;
+    if(!CONF_GATE) return f.vowel;
+    if(CONF_GATE === true) return f.gated ? null : f.vowel;
+    return (f.conf != null && f.conf < CONF_GATE) ? null : f.vowel;
   }
   recogFresh(now){ return !!(this.wsFrame && (now - this.wsFrame.t) < RECOG_STALE_MS); }
 
@@ -739,7 +766,7 @@ export default class SoriJit extends React.Component {
       if(pitch>0) this.lastF0T = now;
       const voiced = level > this.state.thresh && !this.state.calibrating && (now - (this.lastF0T||-1e9) < 250);
       const _useWS = this.state.useRecogWS && !this.demo && this.recogFresh(now);
-      if(voiced) vowel = this.demo ? demoV : (_useWS ? this.wsFrame.vowel : this.classifyVowel());
+      if(voiced) vowel = this.demo ? demoV : (_useWS ? this.wsVowel() : this.classifyVowel());
       // ── 바람(후~) 감지: 피치 없는 큰 소리가 BLOW_HOLD_MS 이상 이어지면 입김으로 본다 ──
       // 박수·타자는 짧아서 지속 조건에 걸러진다. 세기만큼 바람이 세지고(windK 0~1),
       // 방울은 drawSceneSource 에서 막대 고리 반대쪽으로 날려 화면 밖에서 사라진다.

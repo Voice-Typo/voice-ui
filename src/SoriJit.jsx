@@ -68,7 +68,7 @@ export default class SoriJit extends React.Component {
   pitchGraphRef = React.createRef();
   bubbles = []; ghosts = []; parts = []; remnants = [];
   cur = null; pitchHist = []; wave = [];
-  lastVoiceT = 0; lastMeterT = 0; smoothLvl = 0;
+  lastVoiceT = 0; lastPitchT = 0; lastMeterT = 0; smoothLvl = 0;
   smoothSize = 0; rawRms = 0; vpMin = 800;   // 크기 전용 세기(0~2, dB) / 화면 짧은 변(px)
   _pcmRms = null;   // 워크릿이 서버의 10ms 홉 그리드로 로컬 계산해 보내는 rms(가장 최근 값, 평균 아님). null 이면 워크릿 미가동 → analyser 로 대체
   smoothTrem = 0; lastGoodPitch = 0;
@@ -368,7 +368,7 @@ export default class SoriJit extends React.Component {
   start = async ()=>{
     // 새 관람객의 세션 시작점 — 이전 사람의 피치·세기 기준이 남아있지 않도록 여기서 초기화한다.
     // (새로고침으로도 리셋되지만, 리로드 없이 마이크를 다시 켜는 경로가 생기더라도 안전하게.)
-    this.pitchAvg = undefined; this.lvlRef = undefined; this._voicedMs = 0;
+    this.pitchAvg = undefined; this.lvlRef = undefined; this._voicedMs = 0; this.lastPitchT = 0;
     this._refF0 = []; this._refLvl = [];   // 워밍업 표본도 같이 비운다 — 안 비우면 앞사람 기준이 섞인다
     try{
       this.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:1}});
@@ -860,6 +860,11 @@ export default class SoriJit extends React.Component {
 
       if(voiced){
         this.lastVoiceT = now;
+        // 방울을 확정하는 '무음 갭'은 이 값에서 잰다. lastVoiceT 로 재면 voiced 가 피치 소멸 뒤
+        // 250ms 까지 참으로 남아(암소음이 thresh 를 넘고 있으면) 닫히는 시점이 endHold~endHold+250ms
+        // 사이에서 흔들린다 — 같은 간격으로 연타해도 어떤 건 붙고 어떤 건 쪼개지던 원인.
+        // 실제로 음정이 잡힌 마지막 프레임을 기준으로 삼아 갭 길이를 결정적으로 만든다.
+        if(pitch>0 || !this.lastPitchT) this.lastPitchT = now;
         if(!this.cur){
           this.cur = { t0:now, segs:[this.mkSeg(vowel, now)], avgPitch:pitch>0?pitch:this.state.basePitch, trem, everRecognized:!!vowel };
         }
@@ -926,7 +931,7 @@ export default class SoriJit extends React.Component {
         }
       } else if(this.cur){
         this.cur.gapMs = (this.cur.gapMs||0) + dt;   // 무음 갭도 누적 → 다음 발성이 새 덩이로 붙음
-        if(now - this.lastVoiceT > this.state.endHold) this.finishBubble(now, W, H);
+        if(now - this.lastPitchT > this.state.endHold) this.finishBubble(now, W, H);
       }
       // 안전망: 형성이 MAX_FORM_MS 넘게 이어지면 강제 확정
       if(this.cur && now - this.cur.t0 > this.MAX_FORM_MS) this.finishBubble(now, W, H);

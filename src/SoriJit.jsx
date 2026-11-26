@@ -793,7 +793,11 @@ export default class SoriJit extends React.Component {
       // 끊겨 발성이 바람으로 잡혔다. 실측: 진짜 입김 breathK 0.522~0.608 / 오작동 0.002~0.005
       // — 100배 차이라 BREATH_FLAT(0.25) 으로 양쪽 다 넉넉히 갈린다.
       const breathy = !this.demo && !this.state.calibrating && pitch <= 0 && level > this.state.thresh*this.BLOW_GAIN && this.breathK > _breathFlat;
-      if(breathy){ if(!this._blowT0) this._blowT0 = now; } else this._blowT0 = 0;
+      // 입김은 세기가 자연히 출렁여서, 한 프레임만 조건을 벗어나도 250ms 누적이 0 으로
+      // 초기화되면 사실상 성립하지 않는다(실측: level 0.07~0.29 가 문턱 0.09 를 들락거림).
+      // 120ms 유예를 둬 짧은 출렁임은 넘기고, 진짜로 멈췄을 때만 리셋한다.
+      if(breathy){ if(!this._blowT0) this._blowT0 = now; this._blowOkT = now; }
+      else if(now - (this._blowOkT||0) > 120) this._blowT0 = 0;
       const blowing = breathy && now - this._blowT0 > this.BLOW_HOLD_MS;
       // ?diag=1 전용 — 네 조건을 각각 찍어 어디서 막히는지 드러낸다. 소리가 있을 때만, 150ms 간격.
       if(DIAG && this.rawRms > 0.004 && now - (this._diagT||0) > 150){

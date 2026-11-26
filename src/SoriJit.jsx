@@ -789,9 +789,6 @@ export default class SoriJit extends React.Component {
         if(now > this.calibEnd){
           const t = Math.min(.2, Math.max(.03, this.calibMax*1.8+.02));
           this.calibEnd = 0; this.setState({thresh:+t.toFixed(3), calibrating:false});
-          // UI 캘리브레이션이 끝나는 순간 서버 캘리브레이션도 같이 끝낸다 — ref_rms/ref_f0 가
-          // UI가 측정한 것과 같은 발화 구간에서 나오도록(calibrate_start 는 calibrateNoise() 에서 보냄).
-          if(this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({type:'calibrate_end'}));
         }
       }
       // 타자·박수 등 피치 없는 잡음 차단 — f0 가 있어야 발성으로 인정(250ms 여유)
@@ -2834,8 +2831,11 @@ bgRGB(t, P){
     if(!this.state.running || this.state.calibrating) return;
     this.calibMax = 0; this.calibEnd = performance.now()+1600;
     this.setState({calibrating:true, recogRefF0:null});
-    // 서버 캘리브레이션도 같은 발화 구간에서 시작 — 끝은 위 loop() 의 calibEnd 분기에서 보낸다.
-    if(this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({type:'calibrate_start'}));
+    // ⚠️ 서버 캘리브레이션(calibrate_start/end)은 일부러 보내지 않는다.
+    // 이 버튼은 "조용할 때" 누르도록 안내되는데, 그러면 서버가 거의 무음에서 ref_rms 를
+    // 재서(실측 0.00016 vs 학습 중앙값 0.051) 그 연결의 모음 인식이 통째로 망가진다.
+    // 서버는 ref_rms 기본값(학습 32명 중앙값)을 쓰는 calib=no 조건이 정상이고 검증된 상태다.
+    // ref_f0 도 UI 가 읽지 않는 semitones_from_ref 로만 가므로 잃는 것이 없다.
   };
 
   renderVals(){

@@ -55,6 +55,19 @@ function resolveBreathFlat() {
   return (Number.isFinite(n) && n > 0 && n < 1) ? n : null;
 }
 const BREATH_FLAT_OVERRIDE = resolveBreathFlat();
+
+// 발성 문턱(state.thresh) 초기값 override — 기본 0.05.
+// UI 의 "주변 소음 자동 측정"은 thresh 를 실측 소음 바닥 위(조용한 방에서 0.03~0.04)에
+// 놓아주지만 서버 캘리브레이션(ref_rms)까지 같이 건드리고, 새로고침하면 0.05 로 돌아간다.
+// ?thresh=0.035 로 주면 그 버튼 없이 같은 문턱을 쓰고 새로고침해도 유지된다.
+// 입김 판정 문턱은 thresh * BLOW_GAIN(1.8) 이므로 이 값이 입김 민감도도 함께 정한다.
+function resolveThresh() {
+  const v = new URLSearchParams(location.search).get('thresh');
+  if (v == null || v === '') return null;
+  const n = parseFloat(v);
+  return (Number.isFinite(n) && n >= 0.01 && n <= 0.2) ? n : null;
+}
+const THRESH_OVERRIDE = resolveThresh();
 const RECOG_STALE_MS = 300;
 
 // 원본 x-dc 컴포넌트의 props 기본값
@@ -75,7 +88,7 @@ function cssObj(s){
 
 export default class SoriJit extends React.Component {
   state = { running:false, err:'', level:0, pitch:0, dur:0, trem:0, vowel:'', voiced:false,
-    menuOpen:false, sens:1.2, thresh:0.05, basePitch:190, calibrating:false,
+    menuOpen:false, sens:1.2, thresh:(THRESH_OVERRIDE != null ? THRESH_OVERRIDE : 0.05), basePitch:190, calibrating:false,
     endHold:320, sizeMul:1, vowelTol:0.6, meters:true, graph:true, useRecogWS:true, recogStatus:'off', freeze:false,
     bgMode:'off', bgDepth:0, bgShift:0.45, render3d:true, gl3dStatus:'loading',   // bgShift: 배경과 발화색의 파장 간격   // bgDepth: 배경 진하기 (0 아주 연하게 … 1 원색)
     srWarn:'', recogRefF0:null };   // srWarn: AudioContext 샘플레이트가 48000 이 아닐 때의 경고 / recogRefF0: 서버 캘리브레이션이 돌려준 기준 피치
@@ -96,6 +109,7 @@ export default class SoriJit extends React.Component {
   componentDidMount(){
     if(CONF_GATE) console.log('[gate] 표시 단계 신뢰도 게이트 ON:', CONF_GATE === true ? '서버 판정(0.90)' : CONF_GATE);
     if(DIAG) console.log('[diag] 입김 진단 ON. 평탄도 임계:', BREATH_FLAT_OVERRIDE != null ? BREATH_FLAT_OVERRIDE+' (override)' : '0.25 (기본)');
+    if(THRESH_OVERRIDE != null) console.log('[thresh] 발성 문턱 override:', THRESH_OVERRIDE, '(입김 문턱', +(THRESH_OVERRIDE*1.8).toFixed(3), ')');
     const cv = this.canvasRef.current;
     this.ctx = cv.getContext('2d');
     this.onResize = ()=>{ cv.width = cv.clientWidth*devicePixelRatio; cv.height = cv.clientHeight*devicePixelRatio;

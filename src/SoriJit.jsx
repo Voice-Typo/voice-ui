@@ -39,6 +39,22 @@ function resolveConfGate() {
   return (Number.isFinite(n) && n > 0 && n < 1) ? n : true;   // true = 서버 판정 사용
 }
 const CONF_GATE = resolveConfGate();
+
+// 입김 판정 진단 — 기본 꺼짐. ?diag=1 이면 150ms 간격으로 네 조건의 현재값을 찍는다.
+// (입김은 피치 부재 + 세기 + 스펙트럼 평탄도 + 250ms 지속을 모두 요구하는데,
+//  기존 [breath] 로그는 "성공했을 때"만 찍혀서 어디서 막히는지 알 수 없었다.)
+const DIAG = new URLSearchParams(location.search).get('diag') === '1';
+
+// 평탄도 임계 override — 기본값은 클래스 필드 BREATH_FLAT(0.25).
+// BREATH_FLAT 은 2026-10-30 전시의 특정 마이크로 실측한 값이라(진짜 입김 0.522~0.608)
+// 고역 특성이 다른 마이크에서는 넘지 못할 수 있다. ?breath=0.1 처럼 주면 그 값을 쓴다.
+function resolveBreathFlat() {
+  const v = new URLSearchParams(location.search).get('breath');
+  if (v == null || v === '') return null;
+  const n = parseFloat(v);
+  return (Number.isFinite(n) && n > 0 && n < 1) ? n : null;
+}
+const BREATH_FLAT_OVERRIDE = resolveBreathFlat();
 const RECOG_STALE_MS = 300;
 
 // 원본 x-dc 컴포넌트의 props 기본값
@@ -79,6 +95,7 @@ export default class SoriJit extends React.Component {
 
   componentDidMount(){
     if(CONF_GATE) console.log('[gate] 표시 단계 신뢰도 게이트 ON:', CONF_GATE === true ? '서버 판정(0.90)' : CONF_GATE);
+    if(DIAG) console.log('[diag] 입김 진단 ON. 평탄도 임계:', BREATH_FLAT_OVERRIDE != null ? BREATH_FLAT_OVERRIDE+' (override)' : '0.25 (기본)');
     const cv = this.canvasRef.current;
     this.ctx = cv.getContext('2d');
     this.onResize = ()=>{ cv.width = cv.clientWidth*devicePixelRatio; cv.height = cv.clientHeight*devicePixelRatio;
@@ -712,6 +729,7 @@ export default class SoriJit extends React.Component {
     this.stepBake();   // 박막 셸 스프라이트를 시간 예산 안에서 이어 굽는다
 
     let level=0, pitch=-1, vowel=null, trem=0, demoV=null;
+    const _breathFlat = (BREATH_FLAT_OVERRIDE != null) ? BREATH_FLAT_OVERRIDE : this.BREATH_FLAT;
     if(this.state.running && (this.an || this.demo)){
       if(this.demo){
         const r = this.demoSample(now);
@@ -735,7 +753,7 @@ export default class SoriJit extends React.Component {
       // 부분대역 평탄도가 높으면(배음 봉우리 없는 잡음) 피치를 지우고 발성 여유(lastF0T)도 끊는다.
       // WS f0 덮어쓰기 뒤에 둬야 서버 쪽 가짜 f0 도 함께 막힌다.
       this.breathK += (this.breathiness() - this.breathK)*0.5;
-      if(this.rawRms > 0.004 && this.breathK > this.BREATH_FLAT){ pitch = -1; this.lastF0T = -1e9; }
+      if(this.rawRms > 0.004 && this.breathK > _breathFlat){ pitch = -1; this.lastF0T = -1e9; }
       // 휘파람 거부: 모델은 7모음+무음뿐이라 순음에도 확신 있는 모음을 낸다. breathiness()(평탄도)는
       // 순음이 모음보다 더 또렷한 배음이라 반대 방향으로 나와 못 잡고, 피치도 못 잡는다(관측 427Hz는
       // 여성 고음과 겹침). 저역(80~900Hz) 에너지 비율만이 둘을 가른다 — lowBandRatio() 참조.
@@ -774,9 +792,27 @@ export default class SoriJit extends React.Component {
       // 전부 바람이 됐는데, 크게 지르면 level 은 1 에 붙고(문턱 0.09) 피치는 클리핑으로 쉽게
       // 끊겨 발성이 바람으로 잡혔다. 실측: 진짜 입김 breathK 0.522~0.608 / 오작동 0.002~0.005
       // — 100배 차이라 BREATH_FLAT(0.25) 으로 양쪽 다 넉넉히 갈린다.
-      const breathy = !this.demo && !this.state.calibrating && pitch <= 0 && level > this.state.thresh*this.BLOW_GAIN && this.breathK > this.BREATH_FLAT;
+      const breathy = !this.demo && !this.state.calibrating && pitch <= 0 && level > this.state.thresh*this.BLOW_GAIN && this.breathK > _breathFlat;
       if(breathy){ if(!this._blowT0) this._blowT0 = now; } else this._blowT0 = 0;
       const blowing = breathy && now - this._blowT0 > this.BLOW_HOLD_MS;
+      // ?diag=1 전용 — 네 조건을 각각 찍어 어디서 막히는지 드러낸다. 소리가 있을 때만, 150ms 간격.
+      if(DIAG && this.rawRms > 0.004 && now - (this._diagT||0) > 150){
+        this._diagT = now;
+        console.log('[diag]', {
+          rawRms:+this.rawRms.toFixed(4),
+          level:+level.toFixed(3),
+          pitch:+(pitch||0).toFixed(1),
+          breathK:+this.breathK.toFixed(3),
+          need_level:+(this.state.thresh*this.BLOW_GAIN).toFixed(3),
+          need_breathK:+_breathFlat.toFixed(3),
+          ok_pitch: pitch <= 0,
+          ok_level: level > this.state.thresh*this.BLOW_GAIN,
+          ok_breathK: this.breathK > _breathFlat,
+          heldMs: this._blowT0 ? Math.round(now - this._blowT0) : 0,
+          blowing,
+          windK:+this.windK.toFixed(2),
+        });
+      }
       const windT = blowing ? Math.min(1, 0.45 + this.loudNorm(this.rawRms)*0.6) : 0;
       const _prevWindK = this.windK;
       this.windK += (windT - this.windK)*Math.min(1, dt/(windT > this.windK ? 60 : 220));
